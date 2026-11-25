@@ -486,7 +486,7 @@ class Game:
         # RECOMP_RUNNER: a command the run/test/capture binary is started under (a debugger: "lldb --batch -s cmds --"); a test's
         # timeout stops the runner, not the game it launched -- kill that yourself
         self.EXE = f"{self.BASE}_{BIN}"; self.RUNNER = (ENV.get("RECOMP_RUNNER") or "").split()
-        self.windows = WINDOWS or ENV.get("TARGET") == "windows"
+        self.windows = (WINDOWS or ENV.get("TARGET") == "windows") and ENV.get("TARGET") != "ios"
         if self.windows:
             self.TD += "_win"; self.EXE += ".exe"
             if not WINDOWS: self.RUNNER = (ENV.get("WINE") or "wine").split()

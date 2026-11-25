@@ -143,7 +143,8 @@ def main(argv):
     if len(argv) < 2: sys.stdout.write(__doc__); return 1
     BASE = os.path.abspath(argv[0]); OUT = os.path.abspath(argv[1])
     mods = argv[2:] or (ENV.get("RECOMP_MODULE_BASES") or "").split()
-    WIN = HOSTED_WINDOWS or ENV.get("TARGET") == "windows"
+    IOS = ENV.get("TARGET") == "ios"   # cross-built for iPhone: TheosWin clang + iPhoneOS SDK (docs/toolchain.md in the port notes)
+    WIN = (HOSTED_WINDOWS or ENV.get("TARGET") == "windows") and not IOS
     PROFILE, VERIFY = ENV.get("PROFILE"), ENV.get("VERIFY")
     # RECOMP_CPU: the processor the code is compiled for. native (the default when a machine builds for itself): its own,
     # every instruction it has. Each player compiles their own copy, so nothing has to run anywhere else; on x86-64 the
@@ -153,7 +154,7 @@ def main(argv):
     # RECOMP_CFLAGS: more code generation flags (experiments: -O3, -flto=thin). Each set keeps its own objects.
     # The objects are kept per processor, by the name the compiler resolves native to (apple-m4, znver5): an install moved
     # to another machine rebuilds rather than running instructions its processor may not have.
-    cross = WIN and not HOSTED_WINDOWS
+    cross = (WIN and not HOSTED_WINDOWS) or IOS
     cpu = "generic" if cross else (ENV.get("RECOMP_CPU") or "native")
     machine = platform.machine().lower()
     CPUFLAGS = [] if cpu == "generic" else [("-mcpu=" if machine in ("arm64", "aarch64") else "-march=") + cpu]
@@ -179,6 +180,34 @@ def main(argv):
         OUT = OUT.removesuffix(".exe") + ".exe"
         sdl_cflags = ["-I" + os.path.join(SDLW, "include")]
         sdl_libs = [os.path.join(SDLW, "lib", "libSDL3.dll.a")]   # (the import library by path: links under -static too)
+    elif IOS:
+        # iOS: the TheosWin clang and the iPhoneOS SDK, static SDL3/zlib/spirv-cross built with the same toolchain
+        # (D:/work/ios/toolchain). A cross build, so the code is generic: no -march.
+        IT = ENV.get("ATIV_IOS_TOOLCHAIN")
+        SDK = ENV.get("ATIV_IOS_SDK")
+        TC = ENV.get("ATIV_IOS_TC")
+        if not (IT and SDK and TC):
+            die("no iOS toolchain: set ATIV_IOS_TOOLCHAIN (SDL3, zlib and spirv-cross built for ios), "
+                "ATIV_IOS_SDK (the iPhoneOS SDK) and ATIV_IOS_TC (the clang toolchain's bin, with ld64.lld)")
+        CC = os.path.join(TC, "clang.exe" if HOSTED_WINDOWS else "clang")
+        CXX = os.path.join(TC, "clang++.exe" if HOSTED_WINDOWS else "clang++")
+        if not os.path.isfile(CC): die(f"no clang in {TC}")
+        if not os.path.isdir(SDK): die(f"no iPhoneOS SDK at {SDK}")
+        iosflags = ["--target=arm64-apple-ios15.0", "-isysroot", SDK, "-miphoneos-version-min=15.0", "-fuse-ld=lld",
+                    "-F", os.path.join(SDK, "System", "Library", "SubFrameworks"),
+                    "-F", os.path.join(SDK, "System", "Library", "PrivateFrameworks"),
+                    "-I", os.path.join(IT, "zlib", "include"),
+                    # the SDK's libc++ is built for a newer clang and expects these two predefined (Apple silicon's
+                    # cache lines); clang 19 does not define them, and <mutex> reaches them from any C++ file
+                    "-D__GCC_DESTRUCTIVE_SIZE=128", "-D__GCC_CONSTRUCTIVE_SIZE=64"]
+        FLAGS += iosflags
+        # platform_posix.c is the same OS layer macOS and Linux use; ios_shims.m is the compiler-rt the toolchain lacks
+        PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m")]
+        FRAMEWORKS = [x for fr in ("UIKit Metal QuartzCore CoreGraphics CoreAudio AudioToolbox AVFoundation "
+                                   "CoreVideo CoreMotion CoreMedia CoreBluetooth Foundation GameController OpenGLES").split()
+                      for x in ("-framework", fr)] + ["-framework", "CoreHaptics"]
+        sdl_cflags = ["-I" + os.path.join(IT, "SDL3", "include")]
+        sdl_libs = [os.path.join(IT, "SDL3", "lib", "libSDL3.a")] + FRAMEWORKS
     elif LT:
         if not os.path.isfile(os.path.join(LT, "bin", "cc")): die(f"no Linux toolchain at {LT}: run runtime/platform/linux/setup-toolchain.sh")
         if VERIFY or PROFILE: die("VERIFY/PROFILE builds: the machine's own compiler (no ATIV_LINUX_TOOLCHAIN)")
@@ -199,7 +228,7 @@ def main(argv):
     CXX = CXX or ("clang++" if shutil.which("clang++") else "c++")
     tag = "" if not CPUFLAGS else "_" + (resolved_cpu(CC, CPUFLAGS[0]) if cpu == "native" else cpu)
     if extra: tag += "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
-    OBJ = os.path.join(os.path.dirname(BASE), "obj" + ("_prof" if PROFILE else "") + ("_verify" if VERIFY else "") + ("_win" if WIN else "") + ("_lt" if LT else "") + ("_mt" if MT else "") + tag)
+    OBJ = os.path.join(os.path.dirname(BASE), "obj" + ("_prof" if PROFILE else "") + ("_verify" if VERIFY else "") + ("_win" if WIN else "") + ("_ios" if IOS else "") + ("_lt" if LT else "") + ("_mt" if MT else "") + tag)
     os.makedirs(OBJ, exist_ok=True)
     # PROFILE=1: compile the guest code with its per-instruction hook (the host's profiler); objects in obj_prof/
     if PROFILE: FLAGS.append("-DRECOMP_TRACE")
@@ -246,6 +275,7 @@ def main(argv):
     IMGUI = os.path.join(ROOT, "third_party", "imgui"); IMGUIOBJ = os.path.join(OBJ, "imgui"); os.makedirs(IMGUIOBJ, exist_ok=True)
     CXXFLAGS = ["-O2", "-std=c++17", "-w", "-I", IMGUI, "-I", os.path.join(IMGUI, "backends")] + INCLUDES + sdl_cflags
     if WIN: CXXFLAGS += ["-D_FILE_OFFSET_BITS=64", "-include", os.path.join(RT, "platform", "win32_compat.h")]
+    if IOS: CXXFLAGS += iosflags   # (the target triple and sysroot are per-command, not inherited from FLAGS)
     imgui_srcs = [os.path.join(IMGUI, f) for f in ("imgui.cpp", "imgui_draw.cpp", "imgui_tables.cpp", "imgui_widgets.cpp", os.path.join("backends", "imgui_impl_sdl3.cpp"), os.path.join("backends", "imgui_impl_sdlgpu3.cpp"))] + [os.path.join(RT, "ui", "overlay.cpp")]
     # the touch card's input icons (third_party/kenney-prompts/prompts.png) as bytes overlay.cpp includes: a game's binary
     # carries them, wherever it runs from
@@ -293,8 +323,8 @@ def main(argv):
     # spirv-cross (SPIRV-Cross's C API): only needed where SDL_GPU doesn't consume SPIR-V directly,
     # i.e. on Metal (Mac); Vulkan (Linux/Windows) takes our SPIR-V as-is, no translation at runtime.
     SPIRV_CROSS = []
-    SC = os.path.join(MT, "spirv-cross") if MT else None
-    if MT and os.path.isfile(os.path.join(SC, "lib", "libspirv-cross-c.a")):   # (the toolchain's static libraries, Homebrew's release)
+    SC = os.path.join(MT or IT, "spirv-cross") if (MT or IOS) else None
+    if SC and os.path.isfile(os.path.join(SC, "lib", "libspirv-cross-c.a")):   # (the toolchain's static libraries, Homebrew's release)
         SPIRV_CROSS = ["-I" + os.path.join(SC, "include")] + [l for l in (os.path.join(SC, "lib", "libspirv-cross-" + n + ".a") for n in ("c", "msl", "glsl", "hlsl", "reflect", "cpp", "core", "util")) if os.path.isfile(l)] + ["-lc++"]
         FLAGS.append("-DRECOMP_SPIRV_CROSS")
         SPIRV_CROSS += [os.path.join(RT, "gfx", "mtl_archive.m"), "-framework", "Metal", "-framework", "Foundation"]
@@ -313,7 +343,7 @@ def main(argv):
         FLAGS.append("-DRECOMP_MTL_ARCHIVE")
     # overlay.cpp + Dear ImGui are C++: cc (clang) won't pull its runtime in for object files alone, the
     # same reasoning as the spirv-cross block's own comment above
-    CXXLIB = ["-lc++"] if DARWIN or WIN or LT else ["-lstdc++"]   # (zig's libc++ for the install's toolchain)
+    CXXLIB = ["-lc++"] if DARWIN or WIN or LT or IOS else ["-lstdc++"]   # (zig's libc++ for the install's toolchain)
     # libavcodec (FFmpeg): the H.264 decoder behind sceAvcdec* (video.c) and the AAC and MP3 ones behind sceAudiodec* (audiodec.c) -- linked where pkg-config finds it
     # (Homebrew's ffmpeg, a Linux distribution's libavcodec-dev); without it movies fail to start, as before
     AVCODEC = []
@@ -329,12 +359,13 @@ def main(argv):
     CURL = ["-DRECOMP_CURL"] + out_of(["pkg-config", "--cflags", "--libs", "libcurl"]) if not WIN and not LT and not MT and pkg_exists("libcurl") else []   # (none in the Linux install's toolchain: stubs, as on Windows)
     if MT: CURL = ["-DRECOMP_CURL", "-lcurl"]   # (macOS's own libcurl, its headers in the SDK)
     LIBS = ["-lm", "-lpthread", os.path.join(LT, "zlib", "lib", "libz.a") if LT else "-lz", "-ldl"]
-    if WIN: LIBS = ["-L" + os.path.join(WT, "zlib", "lib"), "-lz", "-lpthread", "-lwinmm", "-lws2_32", "-static", "-Wl,--error-limit=0"]   # (ws2_32: net.c's sockets)   # Windows: libc++, libunwind and winpthreads linked in -- only SDL3.dll ships beside the .exe
+    if IOS: LIBS = ["-lm", "-lpthread", os.path.join(IT, "zlib", "lib", "libz.a")]
+    elif WIN: LIBS = ["-L" + os.path.join(WT, "zlib", "lib"), "-lz", "-lpthread", "-lwinmm", "-lws2_32", "-static", "-Wl,--error-limit=0"]   # (ws2_32: net.c's sockets)   # Windows: libc++, libunwind and winpthreads linked in -- only SDL3.dll ships beside the .exe
     # the game's RUN_ENV as the binary's defaults (vitarecomp build exports it; runtime/core/main.c builtin_env): no quotes or backslashes in it
     ENVDEF = [f'-DRECOMP_BUILTIN_ENV="{ENV["RECOMP_RUN_ENV"]}"'] if ENV.get("RECOMP_RUN_ENV") else []
     # the window's icon (window.c): the repository's assets/brand PNG, macOS's drawn on its own inset grid
     icon = os.path.join(ROOT, "assets", "brand", "png", "icon-" + ("macos-512" if DARWIN else "256") + ".png")
-    if not WIN and os.path.isfile(icon): ENVDEF.append(f'-DRECOMP_ICON="{icon}"')
+    if not WIN and not IOS and os.path.isfile(icon): ENVDEF.append(f'-DRECOMP_ICON="{icon}"')
     # the guest addresses the game's hooks use for this build of it (vitarecomp: the pack's GAME_ADDRS; hooks.c game_addr)
     if ENV.get("RECOMP_GAME_ADDRS"): ENVDEF.append(f'-DRECOMP_GAME_ADDRS="{ENV["RECOMP_GAME_ADDRS"]}"')
     host = [part(f) for f in (
