@@ -9,6 +9,7 @@
  * compare the requested version against the running OS.
  */
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <limits.h>
@@ -48,4 +49,30 @@ const char *ios_documents_dir(void)
         if (p.length) snprintf(buf, sizeof buf, "%s/", p.UTF8String);
     }
     return buf;
+}
+
+/* The notch and the home indicator, in *pixels* (UIKit reports points): the on-screen controls and the
+ * menu keep clear of them. Zero before a scene is connected, which is fine -- the layout is remade
+ * every frame. */
+void ios_safe_insets(float *top, float *bottom, float *left, float *right)
+{
+    *top = *bottom = *left = *right = 0.0f;
+    @autoreleasepool {
+        UIWindow *w = nil;
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *win in ((UIWindowScene *)sc).windows) {
+                if (win.isKeyWindow) { w = win; break; }
+            }
+            if (w) break;
+        }
+        if (!w) w = [UIApplication sharedApplication].windows.firstObject;
+        if (!w) return;
+        UIEdgeInsets e = w.safeAreaInsets;
+        CGFloat s = w.screen ? w.screen.scale : (CGFloat)1.0;
+        *top = (float)(e.top * s);
+        *bottom = (float)(e.bottom * s);
+        *left = (float)(e.left * s);
+        *right = (float)(e.right * s);
+    }
 }
