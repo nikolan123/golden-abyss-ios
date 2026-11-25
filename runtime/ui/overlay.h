@@ -61,9 +61,13 @@ int overlay_game_paused(void);
  * from the mouse events window.c forwards to overlay_process_event at all times. overlay_mouse_captured:
  * ImGui wants the pointer (over the bar, one of its menus, or the pull tab) as of the last frame drawn --
  * window.c checks it before a mouse button or motion becomes a touch, so clicks and drags on the bar
- * never reach the game. overlay_bar_dismiss (Escape while the full menu is closed): closes any open bar
+ * never reach the game. overlay_owns_point(x, y): the same question for a *touch screen's* finger
+ * landing there, in the display's point units -- a finger has no hover to capture, so window.c asks
+ * this before the on-screen pad and the game's touch panel see a landing finger (overlay.cpp).
+ * overlay_bar_dismiss (Escape while the full menu is closed): closes any open bar
  * menu and hides the bar. */
 int overlay_mouse_captured(void);
+int overlay_owns_point(float x, float y);
 void overlay_bar_dismiss(void);
 
 /* one-shot flags the Quit and Capture frame buttons set; window.c polls and clears them once a loop

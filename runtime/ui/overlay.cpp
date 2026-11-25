@@ -75,17 +75,12 @@ static int phone_ui(void) {
 #endif
 }
 
-/* a phone's text: sized from the picture's height, so the menu reads the same on any screen.
- * 17-46 points, ~30% of the height for the picture the game is drawn in. */
-extern "C" void window_pixel_size(uint32_t *w, uint32_t *h);
-static float phone_em(void) {
-	uint32_t pw = 0, ph = 0;
-	window_pixel_size(&pw, &ph);
-	float em = ph > 0 ? ph * 0.030f : 24.0f;
-	if (em < 17.0f) em = 17.0f;
-	if (em > 46.0f) em = 46.0f;
-	return em;
-}
+/* a phone's text: sized from the *display's* height in points -- the size ImGui draws in. SDL reports the
+ * window to ImGui in points and separately in pixels (2-3x on a phone: a Retina screen), and sizing from
+ * the pixels made every screen of text that many times too big: 2x on an iPhone 11, 3x on a 15 Pro Max.
+ * 17-46 points, ~3% of the height, floored at 17: iOS's own body text size. */
+static float phone_em(void);   /* (defined below, after the context it reads: g_ctx) */
+static void style_sync(void);  /* (the same: the theme, rebuilt as the display's size becomes known) */
 #include <atomic>
 #include <cfloat>
 #include <cmath>
@@ -153,6 +148,24 @@ static std::atomic<bool> g_quit_card;             /* the quit card is (overlay_q
 static std::atomic<int> g_layout_ask, g_layout_answer;   /* the layout card: asked, and its answer (1 touch, 2 PS TV) */
 static bool g_layout_card, g_layout_remember;
 
+/* the phone's text size (the theme is rebuilt around it in style_sync, called from overlay_init and
+ * every frame: the display's size is only known once a frame has been presented, so the first frame
+ * settles it, and after that only a rotation or a resized window moves it again) */
+static float phone_em(void) {
+	float dh = g_ctx ? ImGui::GetIO().DisplaySize.y : 0.0f;
+	float em = dh > 0 ? dh * 0.030f : 17.0f;
+	if (em < 17.0f) em = 17.0f;
+	if (em > 46.0f) em = 46.0f;
+	return em;
+}
+static float g_style_em = -1.0f;
+static void style_sync(void) {
+	const float em = phone_ui() ? phone_em() : 15.0f;
+	if (em == g_style_em) return;
+	ui::apply(em, 1.0f);   /* the launcher's look (ui_theme.h) */
+	g_style_em = em;
+}
+
 int overlay_init(SDL_GPUDevice *device, SDL_Window *window, SDL_GPUTextureFormat color_fmt) {
 	if (!device) return 0;
 	if (g_ctx) return 1;   /* window.c calls this once at start-up; a repeat (shouldn't happen) is harmless */
@@ -164,7 +177,7 @@ int overlay_init(SDL_GPUDevice *device, SDL_Window *window, SDL_GPUTextureFormat
 	/* (keyboard/gamepad navigation: set per frame in render_frame -- on with the full menu only) */
 	ui::load_system_font(io);   /* an explicit face: without one, ImGui 1.92's own automatic choice (vector vs. bitmap)
 		depends on a DPI scale the headless path never sets, and picks a degenerate (zero-size) one */
-	ui::apply(phone_ui() ? phone_em() : 15.0f, 1.0f);   /* the launcher's look (ui_theme.h); a phone's text scales with its screen */
+	g_style_em = -1.0f; style_sync();   /* pre-frame: phone_em falls back to 17 until the first NewFrame tells it the size */
 	g_has_window = window != nullptr; g_window = window;
 	if (g_has_window && !ImGui_ImplSDL3_InitForSDLGPU(window)) { ImGui::DestroyContext(g_ctx); g_ctx = nullptr; return 0; }
 	ImGui_ImplSDLGPU3_InitInfo info = {};
@@ -421,7 +434,8 @@ static void page_display(void) {
 }
 static void page_performance(void) {
 	if (!ui::rows_begin("perf")) return;
-	ui::row("On-screen stats", "Frame rate and timings drawn over the game. F1 cycles them.");
+	ui::row("On-screen stats", phone_ui() ? "Frame rate and timings drawn over the game."
+	                                    : "Frame rate and timings drawn over the game. F1 cycles them.");
 	{ static const char *const names[3] = {"Off##osd", "FPS##osd", "Full##osd"}; int lvl = metrics_osd_level(); if (ui::segmented(names, 3, &lvl)) set_osd(lvl); }
 	ui::row("Frame rate now");
 	{ char b[48]; unsigned shown = metrics_frame_gen_shown();   /* (frame generation: the frames shown too) */
@@ -632,8 +646,18 @@ static void page_controls(void) {
 	reference_table("shortcuts", shortcuts_count, shortcuts_row);
 }
 static void page_help(void) {
-	section_label("Shortcuts");
-	reference_table("shortcuts", shortcuts_count, shortcuts_row);
+	if (phone_ui()) {   /* a phone has no keyboard: its help is its own controls, not a shortcuts list */
+		section_label("The controls");
+		ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.15f));
+		ui::muted_wrapped("Your thumbs: the stick at the left edge, the face buttons at the right, the shoulders at the top corners. Touch anywhere else in the lower right for the second stick.");
+		ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.2f));
+		ui::muted_wrapped("The picture itself is the Vita's touch screen: tap and drag it as you would the real thing.");
+		ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.2f));
+		ui::muted_wrapped("Pull down from the top of the screen for the quick menu; Game > All settings… opens this menu, and pauses the game while it is up.");
+	} else {
+		section_label("Shortcuts");
+		reference_table("shortcuts", shortcuts_count, shortcuts_row);
+	}
 	section_label("About");
 	{	ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.2f));
 		ImVec2 p = ImGui::GetCursorScreenPos(); const float h = ImGui::GetFontSize() * 1.5f;
@@ -644,7 +668,8 @@ static void page_help(void) {
 	int v = SDL_GetVersion();
 	ImGui::TextDisabled("%s  ·  Dear ImGui %s  ·  SDL %d.%d.%d", title && *title ? title : "unknown title", IMGUI_VERSION, SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v), SDL_VERSIONNUM_MICRO(v));
 	ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.3f));
-	ui::muted_wrapped("The menu bar: move the mouse to the top edge of the window (or tap the tab there). This menu: F10, or the PS button; the game pauses while it's up.");
+	if (phone_ui()) ui::muted_wrapped("The quick menu pulls down from the top of the screen. All settings… (in its Game menu) opens this one; the game pauses while it's up.");
+	else ui::muted_wrapped("The menu bar: move the mouse to the top edge of the window (or tap the tab there). This menu: F10, or the PS button; the game pauses while it's up.");
 }
 
 /* ---- the full menu (build_ui): a panel over the paused, dimmed game -- the game's name and a Paused chip, the
@@ -670,9 +695,26 @@ static void build_ui(void) {
 	ImGui::PopStyleColor();
 	/* header: the game, Paused, Resume */
 	{	const char *name = std::getenv("RECOMP_GAME_NAME"); if (!name || !*name) name = std::getenv("RECOMP_TITLE"); if (!name || !*name) name = "Project Nativ";
-		ui::heading(name, em * 1.35f);
+		/* the Paused chip and the Resume button own the header's right side; the name takes the rest.
+		 * A long one used to run under the button (and clipped mid-letter by the window) instead of
+		 * fitting, so it steps its size down first and then ellipsises -- whatever a game is called. */
+		ImFont *font = ImGui::GetFont();
+		const float rw = ImGui::CalcTextSize("Resume").x + ImGui::GetStyle().FramePadding.x * 2;
+		const float cw = ImGui::CalcTextSize("Paused").x + ImGui::GetFontSize() * 1.7f;   /* the chip's padding, with its gap */
+		float avail = ImGui::GetContentRegionAvail().x - rw - cw - em * 0.7f;
+		float hs = em * 1.35f;
+		char shown[80]; std::snprintf(shown, sizeof shown, "%s", name);
+		if (std::strlen(shown) > 72) shown[72] = 0;   /* (room for the ellipsis, whatever a name is called) */
+		while (hs > em * 0.95f) {   /* step the size down while it overflows the room there is */
+			if (font->CalcTextSizeA(hs, FLT_MAX, 0.0f, shown).x <= avail) break;
+			hs -= em * 0.05f;
+		}
+		int n = (int)std::strlen(shown);
+		while (n > 1 && font->CalcTextSizeA(hs, FLT_MAX, 0.0f, shown, shown + n).x > avail)
+			shown[--n] = 0;   /* the tail goes, one letter at a time */
+		if (n != (int)std::strlen(name)) { if (n > 1) shown[n - 1] = '.'; shown[n] = '.'; shown[n + 1] = '.'; shown[n + 2] = 0; }   /* … where it was cut */
+		ui::heading(shown, hs);
 		ImGui::SameLine(0, em * 0.7f); ImGui::SetCursorPosY(ImGui::GetCursorPosY() + em * 0.18f); ui::chip("Paused", ui::accent);
-		float rw = ImGui::CalcTextSize("Resume").x + ImGui::GetStyle().FramePadding.x * 2;
 		ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - rw);
 		if (ui::primary_button("Resume")) overlay_close();
 	}
@@ -761,8 +803,37 @@ static float g_bar_h;                   /* the bar's height this frame, in point
 
 void overlay_bar_dismiss(void) { if (!g_ctx) return; if (g_intro) intro_end(); else g_dismiss_req = true; }   /* (Escape: the touch card skipped, else the bar away) */
 int overlay_mouse_captured(void) { return g_ctx && g_has_window && g_mouse_captured; }
+/* a finger landing at this point (window.c's finger events, in the display's point units): is it on the
+ * overlay's own controls -- the menu bar while it's down, one of its menus, the pull tab, the game's own
+ * dialogs (save data, a message, text)? On a phone every tap is *also* the game's; nothing above knew
+ * that, so taps on the bar reached the game as touches (and its shoulder keys) while opening its menus
+ * at the same time -- window.c asks this before the pad and the touch panel see the finger. While one
+ * of the bar's menus is open, every tap dismisses it (a phone's "tap anywhere to close") and never
+ * falls through to the game for that one closing tap. Only a *landing* finger asks: one already down
+ * keeps its owner, so dragging a thumb from a control over the bar never steals it. */
+extern "C" int overlay_owns_point(float x, float y) {
+	if (!g_ctx || !g_has_window) return 0;
+	ImGui::SetCurrentContext(g_ctx);
+	ImGuiContext &ctx = *ImGui::GetCurrentContext();
+	if (!ctx.OpenPopupStack.empty()) return 1;   /* the bar's menus: a tap anywhere closes */
+	for (int i = 0; i < ctx.Windows.Size; i++) {
+		const ImGuiWindow *w = ctx.Windows[i];
+		if (!w->WasActive || (w->Flags & ImGuiWindowFlags_NoInputs)) continue;
+		const ImRect r = w->Rect();   /* (this ImGui's own: Pos to Pos+Size) */
+		if (x >= r.Min.x && y >= r.Min.y && x < r.Max.x && y < r.Max.y) return 1;
+	}
+	return 0;
+}
 
 static void menu_game(void) {
+	if (phone_ui()) {   /* a phone: the four things anyone reaches for; no keyboard exists, so no key hints */
+		if (ImGui::MenuItem(g_paused ? "Resume" : "Pause")) overlay_set_paused(!g_paused);
+		if (ImGui::MenuItem("All settings…")) overlay_open();
+		ImGui::TextUnformatted("Volume"); ImGui::SameLine(); volume_slider();
+		ImGui::Separator();
+		if (ImGui::MenuItem(quit_label())) g_want_quit = true;
+		return;
+	}
 	if (ImGui::MenuItem(g_paused ? "Resume" : "Pause")) overlay_set_paused(!g_paused);
 	ImGui::TextUnformatted("Volume"); ImGui::SameLine(); volume_slider();
 	if (ImGui::MenuItem("Capture frame", "F12")) g_want_capture = true;
@@ -771,6 +842,26 @@ static void menu_game(void) {
 	if (ImGui::MenuItem(quit_label())) g_want_quit = true;
 }
 static void menu_view(void) {
+	if (phone_ui()) {   /* a phone: the picture, as drawn; no window, no fullscreen, no F-keys */
+		ImGui::TextUnformatted("On-screen stats");
+		ImGui::Indent();
+		{ static const char *const names[3] = {"Off", "FPS", "Full"}; int lvl = metrics_osd_level();
+		  for (int i = 0; i < 3; i++) if (ImGui::MenuItem(names[i], nullptr, lvl == i)) set_osd(i); }
+		ImGui::Unindent();
+#ifdef __APPLE__
+		ImGui::Separator();
+		{	bool mh = settings_int("metal_hud", 0) != 0;   /* Apple's own overlay (the Performance page explains it): applied at the next start */
+			if (ImGui::MenuItem("Metal HUD", nullptr, &mh)) { settings_set_int("metal_hud", mh ? 1 : 0); settings_save(); }
+			ImGui::PushStyleColor(ImGuiCol_Text, ui::muted); ImGui::TextUnformatted("Frame rate, GPU and memory over the game.\nTakes effect at the next launch."); ImGui::PopStyleColor(); }
+#endif
+		ImGui::Separator();
+		ImGui::TextUnformatted("Resolution");
+		ImGui::Indent();
+		{	int rs = gfx_gpu_render_scale_wanted(), mx = gfx_gpu_render_scale_max(); if (mx > 3) mx = 3;   /* a phone's screen is 2-3x the Vita's */
+			for (int n = 1; n <= mx; n++) { char l[48]; scale_label(l, sizeof l, n); if (ImGui::MenuItem(l, nullptr, rs == n)) gfx_gpu_render_scale_request(n); }
+			ImGui::Unindent(); }
+		return;
+	}
 	if (ImGui::BeginMenu("Resolution")) {
 		int rs = gfx_gpu_render_scale_wanted();
 		for (int n = 1; n <= gfx_gpu_render_scale_max(); n++) { char l[48]; scale_label(l, sizeof l, n); if (ImGui::MenuItem(l, nullptr, rs == n)) gfx_gpu_render_scale_request(n); }
@@ -808,6 +899,21 @@ static void menu_view(void) {
 	}
 }
 static void menu_controls(void) {
+	if (phone_ui()) {   /* a phone: the on-screen pad itself; the touch-cursor rows are a controller's lore */
+		bool on = touchpad_on();
+		if (ImGui::MenuItem("On-screen controls", nullptr, &on)) touchpad_set_on(on);
+		{	int v = touchpad_scale(); ImGui::TextUnformatted("Control size");
+			ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+			if (ImGui::SliderInt("##tpsc2", &v, 60, 160, "%d%%")) touchpad_set_scale(v); }
+		{	int o = settings_int("touchpad_opacity", 42); ImGui::TextUnformatted("See-through controls");
+			ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+			if (ImGui::SliderInt("##tpop2", &o, 10, 90, "%d%%")) { settings_set_int("touchpad_opacity", o); settings_save(); } }
+		bool lh = touchpad_mirror();
+		if (ImGui::MenuItem("Left-handed (swap sides)", nullptr, &lh)) touchpad_set_mirror(lh);
+		ImGui::Separator();
+		if (ImGui::MenuItem("Controls reference…")) open_page(TAB_CONTROLS);   /* (the full menu: pauses) */
+		return;
+	}
 	prefs_load();
 	ImGui::TextDisabled("Touch cursor speed (hold L1/R1, either stick)");
 	ImGui::SetNextItemWidth(170);
@@ -834,6 +940,7 @@ static void menu_help(void) {
 /* the bar: a window the width of the display, exactly one menu-bar high, parked above the top edge by
  * (1 - vis) of its height -- the slide. Its menus are ImGui popups below it. */
 static void build_bar(float w) {
+	if (phone_ui()) ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetFontSize() * 0.55f, ImGui::GetFontSize() * 0.75f));   /* a phone: rows a finger lands in */
 	const float h = ImGui::GetFrameHeight();
 	g_bar_h = h;
 	const float e = g_bar_vis * g_bar_vis * (3.0f - 2.0f * g_bar_vis);   /* smoothstep: eases in and out */
@@ -857,19 +964,20 @@ static void build_bar(float w) {
 		/* (headless dump: a menu forced open -- OpenPopup here shares BeginMenu's ID scope, so the ids match) */
 		if (g_force_menu) { ImGui::OpenPopup(g_force_menu); g_force_menu = nullptr; }
 		if (ImGui::BeginMenu("Game")) { menu_game(); ImGui::EndMenu(); }
-		if (ImGui::BeginMenu("View")) { menu_view(); ImGui::EndMenu(); }
+		if (ImGui::BeginMenu(phone_ui() ? "Display" : "View")) { menu_view(); ImGui::EndMenu(); }
 		if (ImGui::BeginMenu("Controls")) { menu_controls(); ImGui::EndMenu(); }
-		if (ImGui::BeginMenu("Help")) { menu_help(); ImGui::EndMenu(); }
+		if (!phone_ui() && ImGui::BeginMenu("Help")) { menu_help(); ImGui::EndMenu(); }   /* (a phone: the shortcuts list is a keyboard's story; "All settings…" leads there) */
 		ImGui::PopStyleVar(2);
 		ImGui::EndMenuBar();
 	}
 	ImGui::End();
 	ImGui::PopStyleColor(2);
+	if (phone_ui()) ImGui::PopStyleVar();   /* (the phone's taller finger rows) */
 }
 /* the pull tab: a small rounded tongue at the top centre with a chevron, in a window of its own size so
  * it's hoverable and tappable (touch has no top-edge hover); a tap brings the bar down and pins it a while */
 static void build_tab(float w, double t) {
-	const float tw = 72, th = 14;
+	const float tw = phone_ui() ? 110 : 72, th = phone_ui() ? 20 : 14;   /* a phone: a thumb finds it blind */
 	ImGui::SetNextWindowPos(ImVec2(w * 0.5f - tw * 0.5f, 0));
 	ImGui::SetNextWindowSize(ImVec2(tw, th));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0, 0));
@@ -982,14 +1090,15 @@ static void build_toasts(float w, float hgt, double t) {
 /* Game > Pause (not the menu): the picture stays, with this over it */
 static void build_pause_banner(float w, float hgt) {
 	ImFont *font = ImGui::GetFont(); const float fs = ImGui::GetFontSize() * 2.0f;
-	static const char l1[] = "PAUSED", l2[] = "Game > Resume in the menu bar (mouse to the top), or F10";
-	const ImVec2 s1 = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, l1), s2 = font->CalcTextSizeA(fs * 0.5f, FLT_MAX, 0.0f, l2);
+	static const char l1[] = "PAUSED", l2p[] = "Pull down from the top of the screen, then Game > Resume",
+	                   l2d[] = "Game > Resume in the menu bar (mouse to the top), or F10";
+	const ImVec2 s1 = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, l1), s2 = font->CalcTextSizeA(fs * 0.5f, FLT_MAX, 0.0f, phone_ui() ? l2p : l2d);
 	const float pad = 12, bw = fmaxf(s1.x, s2.x) + 2 * pad, bh = s1.y + s2.y + 3 * pad;
 	const ImVec2 p0(w * 0.5f - bw * 0.5f, hgt * 0.5f - bh * 0.5f), p1(p0.x + bw, p0.y + bh);
 	ImDrawList *dl = ImGui::GetBackgroundDrawList();   /* (under the bar's menus, like the HUD) */
 	dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 170), 8.0f);
 	dl->AddText(font, fs, ImVec2(w * 0.5f - s1.x * 0.5f, p0.y + pad), IM_COL32(255, 255, 255, 255), l1);
-	dl->AddText(font, fs * 0.5f, ImVec2(w * 0.5f - s2.x * 0.5f, p0.y + 2 * pad + s1.y), IM_COL32(205, 205, 215, 255), l2);
+	dl->AddText(font, fs * 0.5f, ImVec2(w * 0.5f - s2.x * 0.5f, p0.y + 2 * pad + s1.y), IM_COL32(205, 205, 215, 255), phone_ui() ? l2p : l2d);
 }
 /* the HUD while the menu is closed: the touch markers (window.c's gamepad touch) and the performance overlay
  * (metrics.c's F1 lines) -- no window, no input, the foreground draw list only */
@@ -1238,6 +1347,27 @@ static void build_ime_dialog(float w, float hgt) {
 /* ---- the on-screen pad (touchpad.h) ------------------------------------------------
  * Drawn from the layout window.c hit-tests, so what the eye sees is what the thumb hits.
  * Quiet by design: a dark disc, a thin ring, the Vita's symbols. No glow, no gradients. */
+/* the Vita's own symbols, drawn as stencil shapes (a keyboard's X, O, [] and /\ 
+ * stood in for them before: characters, not glyphs, and never at the line weight the button wants) */
+static void pad_glyph(ImDrawList *dl, int label, ImVec2 c, float r, ImU32 col) {
+	const float t = r * 0.26f;          /* the stencil's line weight */
+	switch (label) {
+	case TP_LABEL_CROSS: { const float s = r * 0.5f;
+		dl->AddLine(ImVec2(c.x - s, c.y - s), ImVec2(c.x + s, c.y + s), col, t);
+		dl->AddLine(ImVec2(c.x - s, c.y + s), ImVec2(c.x + s, c.y - s), col, t); } break;
+	case TP_LABEL_CIRCLE: dl->AddCircle(c, r * 0.48f, col, 24, t); break;
+	case TP_LABEL_SQUARE: dl->AddRect(ImVec2(c.x - r * 0.42f, c.y - r * 0.42f), ImVec2(c.x + r * 0.42f, c.y + r * 0.42f), col, r * 0.14f, t); break;
+	case TP_LABEL_TRIANGLE: { const float s = r * 0.42f;
+		dl->PathLineTo(ImVec2(c.x, c.y - s * 1.08f)); dl->PathLineTo(ImVec2(c.x + s, c.y + s * 0.62f)); dl->PathLineTo(ImVec2(c.x - s, c.y + s * 0.62f));
+		dl->PathStroke(col, ImDrawFlags_Closed, t); } break;
+	case TP_LABEL_START: { const float s = r * 0.34f;   /* a play mark, filled */
+		dl->PathLineTo(ImVec2(c.x - s * 0.7f, c.y - s)); dl->PathLineTo(ImVec2(c.x - s * 0.7f, c.y + s)); dl->PathLineTo(ImVec2(c.x + s, c.y));
+		dl->PathFillConvex(col); } break;
+	case TP_LABEL_SELECT: { const float s = r * 0.36f;   /* two bars, like a bar of menu lines */
+		dl->AddLine(ImVec2(c.x - s, c.y - s * 0.5f), ImVec2(c.x + s, c.y - s * 0.5f), col, s * 0.42f);
+		dl->AddLine(ImVec2(c.x - s, c.y + s * 0.5f), ImVec2(c.x + s, c.y + s * 0.5f), col, s * 0.42f); } break;
+	}
+}
 static void pad_draw(void) {
 	ImGuiIO &io = ImGui::GetIO();
 	touchpad_layout_for(io.DisplaySize.x, io.DisplaySize.y);   /* (the dump draws before the game's first pad read) */
@@ -1273,18 +1403,17 @@ static void pad_draw(void) {
 		if (b->pill) {
 			ImVec2 p0(b->x - b->hw, b->y - b->hh), p1(b->x + b->hw, b->y + b->hh);
 			dl->AddRectFilled(p0, p1, c, b->hh);
-			dl->AddRect(p0, p1, o, b->hh, 0, 1.5f);
-			const char *l = b->label == TP_LABEL_L ? "L" : b->label == TP_LABEL_R ? "R" : b->label == TP_LABEL_START ? "start" : "select";
-			ImVec2 ts = ImGui::CalcTextSize(l);
-			dl->AddText(ImVec2(b->x - ts.x / 2, b->y - ts.y / 2), b->down ? hot : text, l);
+			dl->AddRect(p0, p1, o, b->hh, 1.5f);   /* (rounding, thickness: the old (…, 0, 1.5f) had the 1.5 in `flags`, a zero-thickness ring that never drew) */
+			if (b->label == TP_LABEL_L || b->label == TP_LABEL_R) {
+				const char l[2] = { b->label == TP_LABEL_L ? 'L' : 'R', 0 };
+				ImVec2 ts = ImGui::CalcTextSize(l);
+				dl->AddText(ImVec2(b->x - ts.x / 2, b->y - ts.y / 2), b->down ? hot : text, l);
+			} else pad_glyph(dl, b->label, ImVec2(b->x, b->y), b->hh * 1.1f, b->down ? hot : text);   /* start and select: their icons, not words */
 			continue;
 		}
 		dl->AddCircleFilled(ImVec2(b->x, b->y), b->r, c, 32);
 		dl->AddCircle(ImVec2(b->x, b->y), b->r, o, 32, 1.5f);
-		const char *sym = b->label == TP_LABEL_CROSS ? "X" : b->label == TP_LABEL_CIRCLE ? "O" :
-		                  b->label == TP_LABEL_SQUARE ? "[]" : b->label == TP_LABEL_TRIANGLE ? "/\\" : "";
-		ImVec2 ts = ImGui::CalcTextSize(sym);
-		dl->AddText(ImVec2(b->x - ts.x / 2, b->y - ts.y / 2), b->down ? hot : text, sym);
+		pad_glyph(dl, b->label, ImVec2(b->x, b->y), b->r * 1.55f, b->down ? hot : text);   /* the Vita's own symbols, drawn */
 	}
 }
 
@@ -1305,7 +1434,9 @@ static void build_closed(void) {
 			g_toast_checked = true;
 			if (!settings_has("touch_intro_shown")) {   /* the player's first game: the touch card first (it says where the menu is too) */
 				g_intro = true; settings_set_int("menu_hint_shown", 1); settings_save(); g_paused = true; apply_pause();
-			} else if (!settings_has("menu_hint_shown")) { g_toast_until = t + TOAST_S; overlay_toast_titled("Menu", "Move the mouse to the top, or press [F10] or the PS button", TOAST_S); settings_set_int("menu_hint_shown", 1); settings_save(); }
+			} else if (!settings_has("menu_hint_shown")) { g_toast_until = t + TOAST_S;
+			overlay_toast_titled("Menu", phone_ui() ? "Pull down from the top of the screen for the quick menu" : "Move the mouse to the top, or press [F10] or the PS button", TOAST_S);
+			settings_set_int("menu_hint_shown", 1); settings_save(); }
 		}
 		const ImVec2 m = io.MousePos;
 		const bool inside = ImGui::IsMousePosValid(&m) && m.x >= 0 && m.x < w && m.y >= 0 && m.y < hgt;   /* (focused but outside the window, e.g. on the title bar: the backend reports a position there too) */
@@ -1314,8 +1445,16 @@ static void build_closed(void) {
 		if (!in_hot) { g_hot_since = -1; g_hot_block = false; }
 		else if (g_hot_since < 0) g_hot_since = t;
 		if (in_hot && !g_hot_block && t - g_hot_since >= HOT_DWELL_S) { g_bar_want = true; g_bar_active_t = t; }
-		const bool over_bar = inside && g_bar_vis > 0 && m.y <= bar_h * g_bar_vis + 2;
-		if (over_bar || popup_open || io.WantCaptureMouse || t < g_bar_pin_until) g_bar_active_t = t;
+		/* a touch screen has no hover: a tap leaves the "mouse" wherever the finger last landed, for
+		 * good. So on a phone only a finger actually on the glass counts as "the pointer is over the
+		 * bar" (or one of its menus -- those hold it open on their own): the moment the finger lifts,
+		 * the bar is free to slide away, instead of pinning itself over the game's top edge (where
+		 * the pad's shoulders are) until something else happens. A real mouse (RECOMP_UI_PHONE=1 on
+		 * a desktop, a hover over the bar) still holds, by its source: only touch pointers don't. */
+		const bool touch_ptr = phone_ui() && ImGui::GetIO().MouseSource == ImGuiMouseSource_TouchScreen;
+		const bool held = !touch_ptr || ImGui::IsAnyMouseDown();
+		const bool over_bar = inside && g_bar_vis > 0 && m.y <= bar_h * g_bar_vis + 2 && held;
+		if (over_bar || popup_open || (io.WantCaptureMouse && held) || t < g_bar_pin_until) g_bar_active_t = t;
 		if (g_bar_want && t - g_bar_active_t > HIDE_S) g_bar_want = false;
 		/* the pull tab: with the pointer near the top while the bar is away, and with the hint */
 		const bool near_top = inside && m.y < TAB_NEAR_PX;
@@ -1329,7 +1468,9 @@ static void build_closed(void) {
 		if (g_touch_cursor && g_bar_vis <= 0 && !popup_open && !io.WantCaptureMouse) ImGui::SetMouseCursor(ImGuiMouseCursor_None);   /* (the touch mark stands in for it) */
 	} else {   /* headless (the dump): no pointer; RECOMP_OVERLAY_DUMP_UI says what to show */
 		if (g_force_bar) { g_bar_vis = 1; g_bar_want = true; }
-		if (g_force_toast) { g_toast_until = t + TOAST_S; g_tab_a = 1; g_force_toast = false; overlay_toast_titled("Menu", "Move the mouse to the top, or press [F10] or the PS button", TOAST_S); overlay_toast_titled("Balance", "[A] [D] tilt left / right", TOAST_S); }
+		if (g_force_toast) { g_toast_until = t + TOAST_S; g_tab_a = 1; g_force_toast = false;
+			overlay_toast_titled("Menu", phone_ui() ? "Pull down from the top of the screen for the quick menu" : "Move the mouse to the top, or press [F10] or the PS button", TOAST_S);
+			overlay_toast_titled("Balance", "[A] [D] tilt left / right", TOAST_S); }
 	}
 	{	/* the slide, at a fixed rate either way */
 		const float target = g_bar_want ? 1.0f : 0.0f, step = dt > 0.1f ? 1.0f : dt / SLIDE_S;
@@ -1376,6 +1517,7 @@ static void render_frame(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *target, uint
 		io.DeltaTime = dt_s > 0 ? (float)dt_s : 1.0f / 60.0f;
 	}
 	ImGui::NewFrame();
+	style_sync();   /* DisplaySize is known from here on -- the phone's em settles on the first frame (until then: 17) */
 	g_mouse_captured = io.WantCaptureMouse;   /* (computed by NewFrame from where the pointer was: the bar, a menu, the tab) */
 	build();
 	ImGui::Render();
@@ -1619,8 +1761,8 @@ static void build_intro(void) {
 	const Card *devs;
 	int nd;
 	if (phone_ui()) {
-		phc[0] = {"Your thumbs", "The pad at the left is the left stick; the four buttons at the right are the face buttons. Touch anywhere in the lower right that is not a button for the right stick.", DEV_PHONE};
-		phc[1] = {"Touch screen", "The picture itself is the Vita's screen: tap and drag it as you would the Vita's own.", DEV_TOUCH};
+		phc[0] = {"Your thumbs", "Left edge: the stick. Right edge: the four buttons. Anywhere else in the lower right is a second stick.", DEV_PHONE};
+		phc[1] = {"The screen", "The picture is the Vita's touch screen: tap and drag it as you would the real thing.", DEV_TOUCH};
 		nd = 2;
 		if (SDL_HasGamepad()) phc[nd++] = {"Controller", padb, DEV_PAD};   /* only when one is actually connected */
 		devs = phc;
@@ -1632,11 +1774,11 @@ static void build_intro(void) {
 	ImGui::SetNextWindowSizeConstraints(ImVec2(cw, 0), ImVec2(cw, vp->Size.y - 2 * em));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(em * 1.4f, em * 1.2f));
 	ImGui::Begin("##touchcard", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);   /* (a click anywhere, the card too, is a touch) */
-	ui::heading(g_intro_done < 0 ? (phone_ui() ? "Playing on this phone" : "Touching the screen") : "That's it", em * 1.35f);
+	ui::heading(g_intro_done < 0 ? (phone_ui() ? "Playing on this phone" : "Touching the screen") : "That's it", phone_ui() ? em * 1.15f : em * 1.35f);
 	if (phone_ui()) ui::muted_wrapped("This game was made for a Vita. Its sticks, buttons and touch screen are all here:");
 	else ui::muted_wrapped("Vita games are played with the touch screen as well as buttons. Here's how to touch it:");
 	ImGui::Dummy(ImVec2(0, em * 0.2f));
-	const float dh = em * 3.8f, dw = dh * 3.3f;   /* each row's demonstration strip (intro_demo), at its right */
+	const float dh = phone_ui() ? em * 2.6f : em * 3.8f, dw = dh * 3.3f;   /* each row's demonstration strip (intro_demo), at its right; small on a phone, whose card must fit the thumb drive of a glance */
 	for (int d = 0; d < nd; d++) {
 		const bool on = devs[d].demo == g_intro_dev;
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, on ? ui::with_alpha(ui::accent, 0.13f) : ui::card);

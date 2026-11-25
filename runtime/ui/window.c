@@ -512,6 +512,7 @@ static void finger_script(void) {
 		p = strchr(p, ';'); if (p) p++;
 	}
 }
+static int pad_dbg(void);   /* (defined with the pad, below: RECOMP_PAD_DEBUG gates every routing print) */
 static void screen_finger(const SDL_Event *e) {
 	if (!touch_any() && e->tfinger.touchID != SCRIPT_TOUCH_ID && SDL_GetTouchDeviceType(e->tfinger.touchID) != SDL_TOUCH_DEVICE_DIRECT) return;
 	int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h);
@@ -521,6 +522,7 @@ static void screen_finger(const SDL_Event *e) {
 	if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) { if (k >= 0 && (e->type == SDL_EVENT_FINGER_CANCELED || hold_release(&hold_st[k]))) st_down[k] = 0; return; }
 	int tx, ty;
 	if (k < 0) {   /* a new finger (a motion of one that landed on the bars is ignored) */
+		if (e->type == SDL_EVENT_FINGER_DOWN && pad_dbg()) fprintf(stderr, "    finger %u down at (%.0f, %.0f): the game's touch panel -- no control was touched\n", (unsigned)e->tfinger.fingerID, mx, my);   /* the split, beside the pad's log */
 		if (e->type != SDL_EVENT_FINGER_DOWN || free_k < 0 || !mouse_to_touch(mx, my, 0, &tx, &ty)) return;
 		k = free_k; st_id[k] = e->tfinger.fingerID; st_port[k] = rb_held; hold_down(&hold_st[k]);
 	} else if (!mouse_to_touch(mx, my, 1, &tx, &ty)) return;
@@ -990,7 +992,13 @@ void touchpad_set_on(int on) { settings_set_int("touchpad", on ? 1 : 0); setting
 
 /* the layout for a picture of w x h, in pixels. Everything scales with the height, so a phone
  * and a tablet look the same. The sticks sit where a thumb rests, the shoulders where an index
- * finger reaches, and the middle of the screen stays the game's own touch panel. */
+ * finger reaches, and the middle of the screen stays the game's own touch panel.
+ *
+ * The safe-area insets are honoured only where they bite: the notch (or a Dynamic Island) and the
+ * home indicator sit at the *centre* of their edges, while every control sits in a *corner* -- so the
+ * side and bottom insets clamp, and the controls keep to the thumb's reach instead of drifting toward
+ * the middle of the screen (a full 59-point side inset on a 3x phone pushed the stick a third of the
+ * way in). The top edge keeps its inset: the shoulders are wide, and the island's pills can reach it. */
 static void tp_layout(float w, float h) {
 	const float sc = (touchpad_scale() / 100.0f);
 	if (tv.w == w && tv.h == h && tv.scale == sc && tv.on == touchpad_on() && tv.mirror == touchpad_mirror()) return;
@@ -1000,11 +1008,14 @@ static void tp_layout(float w, float h) {
 	if (!tv.on) return;
 	float st = 0, sb = 0, sl = 0, sr = 0;   /* the notch and the home indicator */
 	safe_insets(&st, &sb, &sl, &sr);
-	const float m = h * 0.035f;
-	const float ml = m + sl, mr = m + sr, mb = m + sb, mt = m + st;
-	const float rl = h * 0.135f * sc;          /* the left stick's reach */
-	const float rb = h * 0.052f * sc;          /* a face button */
-	const float gap = rb * 2.45f;
+	const float clamp = h * 0.030f;
+	const float m = h * 0.025f;
+	const float ml = m + (sl < clamp ? sl : clamp), mr = m + (sr < clamp ? sr : clamp);
+	const float mb = m + (sb * 0.5f < clamp ? sb * 0.5f : clamp);   /* the home indicator: the corner half-space is clear, and never more than the clamp */
+	const float mt = m + st;
+	const float rl = h * 0.140f * sc;          /* the left stick's reach */
+	const float rb = h * 0.055f * sc;          /* a face button */
+	const float gap = rb * 2.2f;
 	const float lx = tv.mirror ? w - mr - rl : ml + rl;
 	const float rx = tv.mirror ? ml + rb + gap : w - mr - rb - gap;   /* the face cluster's centre */
 	const float cy = h - mb - rb - gap;
@@ -1022,11 +1033,16 @@ static void tp_layout(float w, float h) {
 	float ll = tv.mirror ? w - mr - sw : ml, rl2 = tv.mirror ? ml : w - mr - sw;
 	b[4] = (TpButton){ ll + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, LTRIG, TP_LABEL_L, 0 };
 	b[5] = (TpButton){ rl2 + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, RTRIG, TP_LABEL_R, 0 };
-	/* start and select, small and out of the way, between the shoulders */
-	const float pw = w * 0.055f, ph = h * 0.05f;
+	/* start and select, a touch bigger than before (start pauses, in every game), between the shoulders */
+	const float pw = w * 0.065f, ph = h * 0.058f;
 	b[6] = (TpButton){ w / 2 + pw * 1.1f, mt + ph / 2, 0, pw / 2, ph / 2, 1, START, TP_LABEL_START, 0 };
 	b[7] = (TpButton){ w / 2 - pw * 1.1f, mt + ph / 2, 0, pw / 2, ph / 2, 1, SELECT, TP_LABEL_SELECT, 0 };
 	tv.nb = 8;
+	static const char *pad_dbg;
+	if (!pad_dbg) pad_dbg = getenv("RECOMP_PAD_DEBUG");
+	if (pad_dbg && *pad_dbg && *pad_dbg != '0')
+		fprintf(stderr, "    pad layout: %g x %g (insets t%g b%g l%g r%g): stick (%g, %g) r %g; face centre (%g, %g) r %g gap %g; shoulders y %g, h %g; start/select y %g\n",
+		        w, h, st, sb, sl, sr, tv.sl_x, tv.sl_y, tv.sl_r, rx, cy, rb, gap, mt + sh / 2, sh, mt + ph / 2);
 }
 
 /* which control is at (x,y): a button index + 10, 1 the left stick, 2 the right stick's zone, 0 nothing */
@@ -1068,7 +1084,14 @@ static void tp_clear(void) {
 	tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y;
 }
 
-/* a finger over the pad: 1 when the pad took it (and the game's touch panel must not see it) */
+/* a finger over the pad: 1 when the pad took it (and the game's touch panel must not see it). With
+ * RECOMP_PAD_DEBUG=1 each landing finger says where it went and why -- the proof the game's own touch
+ * panel still works everywhere the controls aren't. */
+static int pad_dbg(void) {
+	static int v = -1;
+	if (v < 0) { const char *e = getenv("RECOMP_PAD_DEBUG"); v = e && *e && *e != '0'; }
+	return v;
+}
 static int touchpad_event(const SDL_Event *e) {
 	if (!tv.on || !tv.w) return 0;
 	if (overlay_is_open()) { if (e->type == SDL_EVENT_FINGER_DOWN) tp_clear(); return 0; }   /* the menu's own taps */
@@ -1077,6 +1100,7 @@ static int touchpad_event(const SDL_Event *e) {
 	for (int i = 0; i < 10; i++) if (tpf[i].id == e->tfinger.fingerID) { slot = i; break; }
 	if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) {
 		if (slot < 0) return 0;
+		if (pad_dbg()) fprintf(stderr, "    finger %u up: let go of %s\n", (unsigned)e->tfinger.fingerID, tpf[slot].which == 1 ? "the stick" : tpf[slot].which == 2 ? "the second stick" : tpf[slot].which >= 10 ? "a button" : "nothing");
 		tp_release(tpf[slot].which);
 		tpf[slot].id = 0; tpf[slot].which = 0;
 		return 1;
@@ -1084,6 +1108,9 @@ static int touchpad_event(const SDL_Event *e) {
 	if (e->type == SDL_EVENT_FINGER_DOWN) {
 		int which = tp_hit(x, y);
 		if (!which) return 0;                       /* the game's own touch panel */
+		if (pad_dbg()) fprintf(stderr, "    finger %u down at (%.0f, %.0f): %s\n", (unsigned)e->tfinger.fingerID, x, y,
+			which == 1 ? "the left stick" : which == 2 ? "the floating second stick" : which - 10 == 0 ? "cross" : which - 10 == 1 ? "circle" : which - 10 == 2 ? "square" :
+			which - 10 == 3 ? "triangle" : which - 10 == 4 ? "L" : which - 10 == 5 ? "R" : which - 10 == 6 ? "start" : "select");
 		for (int i = 0; i < 10; i++) if (!tpf[i].id) { slot = i; break; }
 		if (slot < 0) return 1;
 		tpf[slot].id = e->tfinger.fingerID; tpf[slot].which = which;
@@ -1354,8 +1381,16 @@ void window_run(void *(*fn)(void *), void *arg) {
 			}
 			/* a touchscreen's fingers (screen_finger). SDL also makes the first finger the mouse (which == SDL_TOUCH_MOUSEID):
 			 * that stops here, after the menu bar has seen it, so a tap never fires, looks, captures the mouse or switches
-			 * the input to keyboard + mouse */
-			if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) { if (touchpad_event(&e)) continue; screen_finger(&e); continue; }
+			 * the input to keyboard + mouse. A finger *landing* on the overlay's own controls (the bar while it's down,
+			 * one of its menus, the pull tab, a dialog) is the overlay's tap, not the game's touch -- the bar and the
+			 * pad's shoulders share the same top strip otherwise -- so it never reaches the pad or the touch panel.
+			 * A finger already down keeps its owner all the way: dragging off a control is still that control's. */
+			if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) {
+				if (e.type == SDL_EVENT_FINGER_DOWN) { int fw = 0, fh = 0; SDL_GetWindowSize(win, &fw, &fh);
+					if (overlay_owns_point(e.tfinger.x * (float)fw, e.tfinger.y * (float)fh)) {
+						if (pad_dbg()) fprintf(stderr, "    finger %u down at (%.0f, %.0f): the overlay's own tap (the bar, one of its menus, the pull tab or a dialog) -- the game sees nothing\n", (unsigned)e.tfinger.fingerID, e.tfinger.x * fw, e.tfinger.y * fh);
+						continue; } }
+				if (touchpad_event(&e)) continue; screen_finger(&e); continue; }
 			if ((e.type == SDL_EVENT_MOUSE_MOTION && e.motion.which == SDL_TOUCH_MOUSEID) || ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.which == SDL_TOUCH_MOUSEID)) continue;
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F12) { extern void gfxcap_request(void); gfxcap_request(); fprintf(stderr, "capture requested (F12)\n"); }
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F1) metrics_osd_cycle();
