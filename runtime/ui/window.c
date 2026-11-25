@@ -42,6 +42,17 @@
 #include "settings.h"
 #include "overlay.h"
 #include "padbind.h"
+#include "touchpad.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+/* the notch and the home indicator, in pixels (ios_shims.m); nothing on a desktop, or a phone without one */
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+extern void ios_safe_insets(float *top, float *bottom, float *left, float *right);
+static void safe_insets(float *t, float *b, float *l, float *r) { ios_safe_insets(t, b, l, r); }
+#else
+static void safe_insets(float *t, float *b, float *l, float *r) { *t = *b = *l = *r = 0.0f; }
+#endif
 #include "framegen/framegen.h"
 
 enum { SELECT = 0x1, START = 0x8, UP = 0x10, RIGHT = 0x20, DOWN = 0x40, LEFT = 0x80, LTRIG = 0x100, RTRIG = 0x200,
@@ -935,9 +946,184 @@ void window_present(uint32_t base, uint32_t w, uint32_t h, uint32_t pitch) {
 	pthread_mutex_unlock(&lock);
 }
 
-void window_input(uint32_t *b, uint8_t s[4]) {
-	*b = buttons & ~(L3 | R3 | PAD_L2 | PAD_R2);
+/* ---- the on-screen pad (touchpad.h): laid out and hit-tested here, where SDL's fingers arrive */
+#include <math.h>
+static TpVisual tv;
+static struct { SDL_FingerID id; int which; float bx, by; } tpf[10];   /* which: 1 left stick, 2 right stick, 10+i a button */
+static uint32_t tp_bits;
+static uint8_t tp_stick[4] = { 128, 128, 128, 128 };
+static int tp_scale_pct = -1, tp_mirror_on = -1;
+
+const TpVisual *touchpad_visuals(void) { return &tv; }
+static void tp_layout(float w, float h);
+void touchpad_layout_for(float w, float h) { if (w > 0 && h > 0) tp_layout(w, h); }
+
+int touchpad_scale(void) {
+	if (tp_scale_pct < 0) { int v = settings_int("touchpad_scale", 100); tp_scale_pct = v < 60 ? 100 : v > 160 ? 160 : v; }
+	return tp_scale_pct;
+}
+void touchpad_set_scale(int percent) {
+	tp_scale_pct = percent < 60 ? 60 : percent > 160 ? 160 : percent;
+	settings_set_int("touchpad_scale", tp_scale_pct); settings_save(); tv.w = -1;
+}
+int touchpad_mirror(void) { if (tp_mirror_on < 0) tp_mirror_on = settings_int("touchpad_left", 0) != 0; return tp_mirror_on; }
+void touchpad_set_mirror(int on) { tp_mirror_on = on != 0; settings_set_int("touchpad_left", tp_mirror_on); settings_save(); tv.w = -1; }
+
+/* auto: a device with a touchscreen has it on (a phone), a desktop with one off; RECOMP_TOUCHPAD overrides */
+static int touchpad_want(void) {
+	static int v = -2;
+	if (v == -2) {
+		const char *e = getenv("RECOMP_TOUCHPAD");
+		v = e && *e ? atoi(e) : settings_int("touchpad", -1);
+	}
+	return v;
+}
+int touchpad_on(void) {
+	int w = touchpad_want();
+	if (w == 0) return 0;
+	if (w > 0) return 1;
+	static int touch_known = -1;   /* auto: a device with a touchscreen (a phone) has the pad, a desktop does not */
+	if (touch_known < 0) { int n = 0; SDL_TouchID *ids = SDL_GetTouchDevices(&n); SDL_free(ids); touch_known = n > 0; }
+	return touch_known;
+}
+void touchpad_set_on(int on) { settings_set_int("touchpad", on ? 1 : 0); settings_save(); tv.w = -1; }
+
+/* the layout for a picture of w x h, in pixels. Everything scales with the height, so a phone
+ * and a tablet look the same. The sticks sit where a thumb rests, the shoulders where an index
+ * finger reaches, and the middle of the screen stays the game's own touch panel. */
+static void tp_layout(float w, float h) {
+	const float sc = (touchpad_scale() / 100.0f);
+	if (tv.w == w && tv.h == h && tv.scale == sc && tv.on == touchpad_on() && tv.mirror == touchpad_mirror()) return;
+	memset(&tv, 0, sizeof tv);
+	tv.on = touchpad_on(); tv.w = w; tv.h = h; tv.scale = sc; tv.mirror = touchpad_mirror();
+	tv.opacity = settings_int("touchpad_opacity", 42);
+	if (!tv.on) return;
+	float st = 0, sb = 0, sl = 0, sr = 0;   /* the notch and the home indicator */
+	safe_insets(&st, &sb, &sl, &sr);
+	const float m = h * 0.035f;
+	const float ml = m + sl, mr = m + sr, mb = m + sb, mt = m + st;
+	const float rl = h * 0.135f * sc;          /* the left stick's reach */
+	const float rb = h * 0.052f * sc;          /* a face button */
+	const float gap = rb * 2.45f;
+	const float lx = tv.mirror ? w - mr - rl : ml + rl;
+	const float rx = tv.mirror ? ml + rb + gap : w - mr - rb - gap;   /* the face cluster's centre */
+	const float cy = h - mb - rb - gap;
+	tv.sl_x = lx; tv.sl_y = h - mb - rl; tv.sl_r = rl;
+	tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y;
+	tv.sr_r = h * 0.115f * sc;
+
+	TpButton *b = tv.b;
+	b[0] = (TpButton){ rx, cy - gap, rb, 0, 0, 0, TRIANGLE, TP_LABEL_TRIANGLE, 0 };
+	b[1] = (TpButton){ rx + gap, cy, rb, 0, 0, 0, CIRCLE, TP_LABEL_CIRCLE, 0 };
+	b[2] = (TpButton){ rx, cy + gap, rb, 0, 0, 0, CROSS, TP_LABEL_CROSS, 0 };
+	b[3] = (TpButton){ rx - gap, cy, rb, 0, 0, 0, SQUARE, TP_LABEL_SQUARE, 0 };
+	/* the shoulders: pills along the top, full width enough to hit with an index finger */
+	const float sw = w * 0.13f, sh = h * 0.075f;
+	float ll = tv.mirror ? w - mr - sw : ml, rl2 = tv.mirror ? ml : w - mr - sw;
+	b[4] = (TpButton){ ll + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, LTRIG, TP_LABEL_L, 0 };
+	b[5] = (TpButton){ rl2 + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, RTRIG, TP_LABEL_R, 0 };
+	/* start and select, small and out of the way, between the shoulders */
+	const float pw = w * 0.055f, ph = h * 0.05f;
+	b[6] = (TpButton){ w / 2 + pw * 1.1f, mt + ph / 2, 0, pw / 2, ph / 2, 1, START, TP_LABEL_START, 0 };
+	b[7] = (TpButton){ w / 2 - pw * 1.1f, mt + ph / 2, 0, pw / 2, ph / 2, 1, SELECT, TP_LABEL_SELECT, 0 };
+	tv.nb = 8;
+}
+
+/* which control is at (x,y): a button index + 10, 1 the left stick, 2 the right stick's zone, 0 nothing */
+static int tp_hit(float x, float y) {
+	for (int i = 0; i < tv.nb; i++) {
+		const TpButton *b = &tv.b[i];
+		if (b->pill) { if (fabsf(x - b->x) <= b->hw && fabsf(y - b->y) <= b->hh) return 10 + i; }
+		else if (hypotf(x - b->x, y - b->y) <= b->r * 1.18f) return 10 + i;
+	}
+	if (hypotf(x - tv.sl_x, y - tv.sl_y) <= tv.sl_r * 1.55f) return 1;
+	/* the floating right stick: the lower right quarter, minus the cluster the buttons already took */
+	const int right_side = tv.mirror ? (x < tv.w * 0.55f) : (x > tv.w * 0.45f);
+	if (right_side && y > tv.h * 0.30f) return 2;
+	return 0;
+}
+
+static void tp_apply_stick(int which, float x, float y, float bx, float by, float reach, uint8_t *ox, uint8_t *oy) {
+	float dx = (x - bx) / reach, dy = (y - by) / reach;
+	float d = hypotf(dx, dy);
+	if (d > 1.0f) { dx /= d; dy /= d; d = 1.0f; }
+	if (d < 0.14f) dx = dy = 0.0f;                 /* the deadzone: a resting thumb is not a nudge */
+	(void)which;
+	*ox = (uint8_t)(128 + dx * 127);
+	*oy = (uint8_t)(128 + dy * 127);
+}
+
+static void tp_release(int which) {
+	if (which >= 10) { int i = which - 10; if (i < tv.nb) { tp_bits &= ~tv.b[i].bit; tv.b[i].down = 0; } }
+	else if (which == 1) { tv.sl_active = 0; tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y; tp_stick[0] = tp_stick[1] = 128; }
+	else if (which == 2) { tv.sr_active = 0; tp_stick[2] = tp_stick[3] = 128; }
+}
+
+static void tp_clear(void) {
+	memset(tpf, 0, sizeof tpf);
+	tp_bits = 0;
+	tp_stick[0] = tp_stick[1] = tp_stick[2] = tp_stick[3] = 128;
+	for (int i = 0; i < tv.nb; i++) tv.b[i].down = 0;
+	tv.sl_active = tv.sr_active = 0;
+	tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y;
+}
+
+/* a finger over the pad: 1 when the pad took it (and the game's touch panel must not see it) */
+static int touchpad_event(const SDL_Event *e) {
+	if (!tv.on || !tv.w) return 0;
+	if (overlay_is_open()) { if (e->type == SDL_EVENT_FINGER_DOWN) tp_clear(); return 0; }   /* the menu's own taps */
+	const float x = e->tfinger.x * tv.w, y = e->tfinger.y * tv.h;
+	int slot = -1;
+	for (int i = 0; i < 10; i++) if (tpf[i].id == e->tfinger.fingerID) { slot = i; break; }
+	if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) {
+		if (slot < 0) return 0;
+		tp_release(tpf[slot].which);
+		tpf[slot].id = 0; tpf[slot].which = 0;
+		return 1;
+	}
+	if (e->type == SDL_EVENT_FINGER_DOWN) {
+		int which = tp_hit(x, y);
+		if (!which) return 0;                       /* the game's own touch panel */
+		for (int i = 0; i < 10; i++) if (!tpf[i].id) { slot = i; break; }
+		if (slot < 0) return 1;
+		tpf[slot].id = e->tfinger.fingerID; tpf[slot].which = which;
+		tpf[slot].bx = x; tpf[slot].by = y;
+		if (which >= 10) { int i = which - 10; tp_bits |= tv.b[i].bit; tv.b[i].down = 1; }
+		else if (which == 1) { tv.sl_active = 1; tp_apply_stick(1, x, y, tv.sl_x, tv.sl_y, tv.sl_r, &tp_stick[0], &tp_stick[1]); tv.sl_kx = x; tv.sl_ky = y; }
+		else if (which == 2) {
+			tv.sr_active = 1;
+			/* the base is where the thumb landed, kept inside the picture */
+			float bx = x, by = y;
+			if (bx < tv.sr_r) bx = tv.sr_r;
+			if (bx > tv.w - tv.sr_r) bx = tv.w - tv.sr_r;
+			if (by > tv.h - tv.sr_r) by = tv.h - tv.sr_r;
+			tv.sr_x = bx; tv.sr_y = by;
+			tv.sr_kx = x; tv.sr_ky = y;
+			tp_apply_stick(2, x, y, bx, by, tv.sr_r, &tp_stick[2], &tp_stick[3]);
+		}
+		return 1;
+	}
+	if (e->type == SDL_EVENT_FINGER_MOTION && slot >= 0) {
+		const int which = tpf[slot].which;
+		if (which == 1) { tp_apply_stick(1, x, y, tv.sl_x, tv.sl_y, tv.sl_r, &tp_stick[0], &tp_stick[1]); tv.sl_kx = x; tv.sl_ky = y; }
+		else if (which == 2) { tp_apply_stick(2, x, y, tpf[slot].bx, tpf[slot].by, tv.sr_r, &tp_stick[2], &tp_stick[3]); tv.sr_kx = x; tv.sr_ky = y; }
+		return 1;
+	}
+	return 0;
+}
+
+/* the pad's contribution to the game's input this frame */
+static void touchpad_read(uint32_t *b, uint8_t s[4]) {
+	if (!tv.on) return;
+	*b |= tp_bits;
+	if (tp_stick[0] != 128 || tp_stick[1] != 128) { s[0] = tp_stick[0]; s[1] = tp_stick[1]; }
+	if (tp_stick[2] != 128 || tp_stick[3] != 128) { s[2] = tp_stick[2]; s[3] = tp_stick[3]; }
+}
+
+void window_input(uint32_t *b, uint8_t s[4]) {	*b = buttons & ~(L3 | R3 | PAD_L2 | PAD_R2);
 	for (int i = 0; i < 4; i++) s[i] = sticks[i];
+	tp_layout((float)win_pw, (float)win_ph);
+	touchpad_read(b, s);   /* the on-screen pad's buttons and sticks, over the keyboard's and the pad's */
 	/* the sticks are the touch cursor while a bumper is held -- unless the touchpad is doing the touching
 	 * (RB held only to put its fingers on the rear panel: the sticks stay the game's) */
 	if (cur_mode && !touchpad_active()) s[0] = s[1] = s[2] = s[3] = 128;
@@ -1066,7 +1252,11 @@ void window_run(void *(*fn)(void *), void *arg) {
 	}
 	int scale = getenv("RECOMP_SCALE") ? atoi(getenv("RECOMP_SCALE")) : 1;
 	if (scale < 1) scale = 1;
-	{ const char *name = getenv("RECOMP_GAME_NAME"); win = SDL_CreateWindow(name && *name ? name : "Project Nativ", 960 * scale, 544 * scale, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY); }
+	{ const char *name = getenv("RECOMP_GAME_NAME");
+  int ww = 960 * scale, wh = 544 * scale;
+  { const char *ws = getenv("RECOMP_WINDOW_SIZE"); int a = 0, b = 0;   /* WWxHH: a phone's aspect can be looked at on a desktop */
+    if (ws && *ws && sscanf(ws, "%dx%d", &a, &b) == 2 && a >= 320 && b >= 240) { ww = a; wh = b; } }
+  win = SDL_CreateWindow(name && *name ? name : "Project Nativ", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY); }
 	{	/* the app icon (assets/brand): the install's, as vitarecomp run names it (an AppImage's moves on every start), else
 		 * the one the build saw */
 		const char *ip = getenv("RECOMP_ICON");
@@ -1165,7 +1355,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 			/* a touchscreen's fingers (screen_finger). SDL also makes the first finger the mouse (which == SDL_TOUCH_MOUSEID):
 			 * that stops here, after the menu bar has seen it, so a tap never fires, looks, captures the mouse or switches
 			 * the input to keyboard + mouse */
-			if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) { screen_finger(&e); continue; }
+			if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) { if (touchpad_event(&e)) continue; screen_finger(&e); continue; }
 			if ((e.type == SDL_EVENT_MOUSE_MOTION && e.motion.which == SDL_TOUCH_MOUSEID) || ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.which == SDL_TOUCH_MOUSEID)) continue;
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F12) { extern void gfxcap_request(void); gfxcap_request(); fprintf(stderr, "capture requested (F12)\n"); }
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F1) metrics_osd_cycle();
