@@ -971,14 +971,16 @@ void touchpad_set_scale(int percent) {
 int touchpad_mirror(void) { if (tp_mirror_on < 0) tp_mirror_on = settings_int("touchpad_left", 0) != 0; return tp_mirror_on; }
 void touchpad_set_mirror(int on) { tp_mirror_on = on != 0; settings_set_int("touchpad_left", tp_mirror_on); settings_save(); tv.w = -1; }
 
-/* auto: a device with a touchscreen has it on (a phone), a desktop with one off; RECOMP_TOUCHPAD overrides */
+/* auto: a device with a touchscreen has it on (a phone), a desktop with one off; RECOMP_TOUCHPAD overrides.
+ * The value is cached -- settings are read once, not per frame -- and *invalidated on write*, or the
+ * toggle in the menu did nothing until the next start: the cache alone answered. */
+static int tp_want_v = -2;
 static int touchpad_want(void) {
-	static int v = -2;
-	if (v == -2) {
+	if (tp_want_v == -2) {
 		const char *e = getenv("RECOMP_TOUCHPAD");
-		v = e && *e ? atoi(e) : settings_int("touchpad", -1);
+		tp_want_v = e && *e ? atoi(e) : settings_int("touchpad", -1);
 	}
-	return v;
+	return tp_want_v;
 }
 int touchpad_on(void) {
 	int w = touchpad_want();
@@ -988,7 +990,7 @@ int touchpad_on(void) {
 	if (touch_known < 0) { int n = 0; SDL_TouchID *ids = SDL_GetTouchDevices(&n); SDL_free(ids); touch_known = n > 0; }
 	return touch_known;
 }
-void touchpad_set_on(int on) { settings_set_int("touchpad", on ? 1 : 0); settings_save(); tv.w = -1; }
+void touchpad_set_on(int on) { settings_set_int("touchpad", on ? 1 : 0); settings_save(); tp_want_v = -2; tv.w = -1; }   /* (the cache: re-read, the layout: re-made) */
 
 /* the layout for a picture of w x h, in pixels. Everything scales with the height, so a phone
  * and a tablet look the same. The sticks sit where a thumb rests, the shoulders where an index
@@ -1053,9 +1055,14 @@ static int tp_hit(float x, float y) {
 		else if (hypotf(x - b->x, y - b->y) <= b->r * 1.18f) return 10 + i;
 	}
 	if (hypotf(x - tv.sl_x, y - tv.sl_y) <= tv.sl_r * 1.55f) return 1;
-	/* the floating right stick: the lower right quarter, minus the cluster the buttons already took */
-	const int right_side = tv.mirror ? (x < tv.w * 0.55f) : (x > tv.w * 0.45f);
-	if (right_side && y > tv.h * 0.30f) return 2;
+	/* the floating right stick: the lower-right *corner*, and a setting (off: nothing but the buttons
+	 * and the fixed left stick is claimed). The old zone was 55% x 70% of the picture -- a game that
+	 * aims its camera with screen swipes (as this one does) had its swipes eaten in the middle of the
+	 * screen, "touch not working in random places"; the corner is where an aiming thumb lands anyway. */
+	if (settings_int("touchpad_rstick", 1) && y > tv.h * 0.55f) {
+		const int right_corner = tv.mirror ? (x < tv.w * 0.40f) : (x > tv.w * 0.60f);
+		if (right_corner) return 2;
+	}
 	return 0;
 }
 
@@ -1149,7 +1156,12 @@ static void touchpad_read(uint32_t *b, uint8_t s[4]) {
 
 void window_input(uint32_t *b, uint8_t s[4]) {	*b = buttons & ~(L3 | R3 | PAD_L2 | PAD_R2);
 	for (int i = 0; i < 4; i++) s[i] = sticks[i];
-	tp_layout((float)win_pw, (float)win_ph);
+	/* the pad is laid out once a frame by the overlay, in the display's *point* space (the space its
+	 * sprites are drawn in and SDL's finger coordinates are fractions of, whatever the pixel scale);
+	 * this thread used to re-lay it out in *swapchain pixels* every read, a second scale racing the
+	 * first every frame. Only the time before the first frame presents falls back to laying out here,
+	 * in the window's point size -- the one scale there is. */
+	if (!tv.w && win) { int pw = 0, ph = 0; SDL_GetWindowSize(win, &pw, &ph); if (pw > 0 && ph > 0) tp_layout((float)pw, (float)ph); }
 	touchpad_read(b, s);   /* the on-screen pad's buttons and sticks, over the keyboard's and the pad's */
 	/* the sticks are the touch cursor while a bumper is held -- unless the touchpad is doing the touching
 	 * (RB held only to put its fingers on the rear panel: the sticks stay the game's) */

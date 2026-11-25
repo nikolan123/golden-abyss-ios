@@ -65,6 +65,7 @@ INFO_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 \t\t<string>UIInterfaceOrientationLandscapeRight</string>
 \t</array>
 \t<key>UIFileSharingEnabled</key><true/>
+\t<key>UIApplicationSupportsIndirectInputEvents</key><true/>
 \t<key>LSSupportsOpeningDocumentsInPlace</key><true/>
 \t<key>UIRequiresFullScreen</key><true/>
 </dict>

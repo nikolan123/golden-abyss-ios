@@ -140,6 +140,7 @@ static bool g_has_window;      /* overlay_init was given a real SDL_Window: the 
  * in the menu bar -- the game held (display.c, as for the menu) with nothing but a banner on screen */
 static std::atomic<bool> g_open, g_want_quit, g_want_capture, g_paused;
 static std::atomic<bool> g_intro;                 /* the touch card is up (the game paused under it) */
+static double g_intro_since;                     /* when the phone's hint strip first showed (build_intro_hint, below) */
 static void intro_end(void); static void build_intro(void);
 static std::atomic<bool> g_prep_card;             /* the shader prep card is up (in the menu's open state: the game paused, input to the card) */
 static int g_prep_demo[3] = {-1, 0, 0};           /* RECOMP_OVERLAY_DUMP_UI=prep: the card with these numbers (done, total, seconds left) */
@@ -432,8 +433,21 @@ static void page_display(void) {
 	}
 	ui::rows_end();
 }
-static void page_performance(void) {
-	if (!ui::rows_begin("perf")) return;
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+/* Apple's Metal HUD, as a menu row: macOS only. On an iPhone it means MTL_HUD_ENABLED, which a jailbroken
+ * phone answers with a dylib injector (libMTLHud) that hooks the layer machinery -- a device's own report
+ * (2026-11-26): with it on, touches died in places and the orientation broke on an app-switcher re-entry;
+ * with it off and a restart, both worked. A phone's stats are the overlay's own drawn HUD (On-screen stats). */
+static bool metal_hud_row(void) {
+#if defined(__APPLE__) && (!defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE)
+	return true;
+#else
+	return false;
+#endif
+}
+static void page_performance(void) {	if (!ui::rows_begin("perf")) return;
 	ui::row("On-screen stats", phone_ui() ? "Frame rate and timings drawn over the game."
 	                                    : "Frame rate and timings drawn over the game. F1 cycles them.");
 	{ static const char *const names[3] = {"Off##osd", "FPS##osd", "Full##osd"}; int lvl = metrics_osd_level(); if (ui::segmented(names, 3, &lvl)) set_osd(lvl); }
@@ -441,10 +455,10 @@ static void page_performance(void) {
 	{ char b[48]; unsigned shown = metrics_frame_gen_shown();   /* (frame generation: the frames shown too) */
 	  if (shown) std::snprintf(b, sizeof b, "%.0f fps, frame gen %u", metrics_fps(), shown); else std::snprintf(b, sizeof b, "%.0f fps", metrics_fps());
 	  ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f); ImGui::TextUnformatted(b); ImGui::PopFont(); }
-#ifdef __APPLE__
-	ui::row("Metal HUD", "Apple's own overlay, drawn by Metal over the game: frame rate, GPU time, memory. Applies the next time the game starts (Metal reads it when it makes the device).");
-	{ bool on = settings_int("metal_hud", 0) != 0; if (ui::toggle("mhud", &on)) { settings_set_int("metal_hud", on ? 1 : 0); settings_save(); } }
-#endif
+	if (metal_hud_row()) {
+		ui::row("Metal HUD", "Apple's own overlay, drawn by Metal over the game: frame rate, GPU time, memory. Applies the next time the game starts (Metal reads it when it makes the device).");
+		{ bool on = settings_int("metal_hud", 0) != 0; if (ui::toggle("mhud", &on)) { settings_set_int("metal_hud", on ? 1 : 0); settings_save(); } }
+	}
 	ui::rows_end();
 }
 static void page_game(void) {
@@ -547,6 +561,8 @@ static void page_controls(void) {
 		if (phone_ui()) {
 			ui::row("On-screen pad", "The sticks, buttons and shoulders drawn over the picture. Off: the screen is only the Vita's touch panel.");
 			{ bool on = touchpad_on(); if (ui::toggle("tp_on", &on)) touchpad_set_on(on); }
+			ui::row("Second stick", "A floating right stick where a thumb lands in the lower right corner. Off: every touch there goes to the game instead (a game that aims by swiping the picture wants it off).");
+			{ bool rs = settings_int("touchpad_rstick", 1) != 0; if (ui::toggle("tp_rs", &rs)) { settings_set_int("touchpad_rstick", rs ? 1 : 0); settings_save(); } }
 			ui::row("Pad size");
 			{ int v = touchpad_scale(); ImGui::SetNextItemWidth(-FLT_MIN);
 			  if (ImGui::SliderInt("##tpsc", &v, 60, 160, "%d%%")) touchpad_set_scale(v); }
@@ -848,18 +864,18 @@ static void menu_view(void) {
 		{ static const char *const names[3] = {"Off", "FPS", "Full"}; int lvl = metrics_osd_level();
 		  for (int i = 0; i < 3; i++) if (ImGui::MenuItem(names[i], nullptr, lvl == i)) set_osd(i); }
 		ImGui::Unindent();
-#ifdef __APPLE__
-		ImGui::Separator();
-		{	bool mh = settings_int("metal_hud", 0) != 0;   /* Apple's own overlay (the Performance page explains it): applied at the next start */
-			if (ImGui::MenuItem("Metal HUD", nullptr, &mh)) { settings_set_int("metal_hud", mh ? 1 : 0); settings_save(); }
-			ImGui::PushStyleColor(ImGuiCol_Text, ui::muted); ImGui::TextUnformatted("Frame rate, GPU and memory over the game.\nTakes effect at the next launch."); ImGui::PopStyleColor(); }
-#endif
 		ImGui::Separator();
 		ImGui::TextUnformatted("Resolution");
 		ImGui::Indent();
 		{	int rs = gfx_gpu_render_scale_wanted(), mx = gfx_gpu_render_scale_max(); if (mx > 3) mx = 3;   /* a phone's screen is 2-3x the Vita's */
 			for (int n = 1; n <= mx; n++) { char l[48]; scale_label(l, sizeof l, n); if (ImGui::MenuItem(l, nullptr, rs == n)) gfx_gpu_render_scale_request(n); }
 			ImGui::Unindent(); }
+		if (metal_hud_row()) {   /* (macOS's desktop-phone test only: on an iPhone, injected HUDs break the touch and the orientation; the phone's own stats are above) */
+			ImGui::Separator();
+			bool mh = settings_int("metal_hud", 0) != 0;
+			if (ImGui::MenuItem("Metal HUD", nullptr, &mh)) { settings_set_int("metal_hud", mh ? 1 : 0); settings_save(); }
+			ImGui::PushStyleColor(ImGuiCol_Text, ui::muted); ImGui::TextUnformatted("Frame rate, GPU and memory over the game.\nTakes effect at the next launch."); ImGui::PopStyleColor();
+		}
 		return;
 	}
 	if (ImGui::BeginMenu("Resolution")) {
@@ -902,6 +918,8 @@ static void menu_controls(void) {
 	if (phone_ui()) {   /* a phone: the on-screen pad itself; the touch-cursor rows are a controller's lore */
 		bool on = touchpad_on();
 		if (ImGui::MenuItem("On-screen controls", nullptr, &on)) touchpad_set_on(on);
+		{	bool rs = settings_int("touchpad_rstick", 1) != 0;   /* off: a game that aims by swiping the picture gets every touch */
+			if (ImGui::MenuItem("Second stick (the lower right corner)", nullptr, &rs)) { settings_set_int("touchpad_rstick", rs ? 1 : 0); settings_save(); } }
 		{	int v = touchpad_scale(); ImGui::TextUnformatted("Control size");
 			ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
 			if (ImGui::SliderInt("##tpsc2", &v, 60, 160, "%d%%")) touchpad_set_scale(v); }
@@ -1432,8 +1450,9 @@ static void build_closed(void) {
 	if (g_has_window) {
 		if (!g_toast_checked) {   /* the hint, once per game, on this overlay's first windowed frame */
 			g_toast_checked = true;
-			if (!settings_has("touch_intro_shown")) {   /* the player's first game: the touch card first (it says where the menu is too) */
-				g_intro = true; settings_set_int("menu_hint_shown", 1); settings_save(); g_paused = true; apply_pause();
+			if (!settings_has("touch_intro_shown")) {   /* the player's first game: the touch hint first (a phone's is a small strip over the *running* game) */
+				g_intro = true; g_intro_since = 0; settings_set_int("menu_hint_shown", 1); settings_save();
+				if (!phone_ui()) { g_paused = true; apply_pause(); }   /* (the desktop's touch card pauses and waits: it teaches keys; a phone's thumbs need no lesson the running game can't give) */
 			} else if (!settings_has("menu_hint_shown")) { g_toast_until = t + TOAST_S;
 			overlay_toast_titled("Menu", phone_ui() ? "Pull down from the top of the screen for the quick menu" : "Move the mouse to the top, or press [F10] or the PS button", TOAST_S);
 			settings_set_int("menu_hint_shown", 1); settings_save(); }
@@ -1734,6 +1753,39 @@ static void intro_demo(ImDrawList *dl, int dev, bool on, int fam, ImVec2 p, floa
 		if (cursor) { dl->AddLine(ImVec2(m.x - r * 1.5f, m.y), ImVec2(m.x + r * 1.5f, m.y), mc, 1.0f); dl->AddLine(ImVec2(m.x, m.y - r * 1.5f), ImVec2(m.x, m.y + r * 1.5f), mc, 1.0f); }
 	}
 }
+/* the phone's touch hint (g_intro): the old card filled the screen over a *paused* game, teaching
+ * what five seconds of running game would -- "useless", as the phone itself put it. This is a small
+ * strip at the bottom centre instead: no pause, no modal, taps fall through it to the running game
+ * (NoInputs), the corner controls sit clear of it, and the first touch anywhere -- or twelve seconds
+ * -- puts it away for good (intro_end writes touch_intro_shown). Between the dismissal and this card's
+ * controls there is never a moment the game's own touch is blocked. */
+static void build_intro_hint(void) {
+	const double t = g_intro_at >= 0 ? g_intro_at : ImGui::GetTime();
+	if (g_intro_at < 0) {   /* (a headless dump holds its own moment, and dismisses nothing) */
+		if (g_intro_since <= 0) g_intro_since = t;
+		if (g_has_window && g_intro_done < 0 && t - g_intro_since > 12) { intro_end(); return; }
+	}
+	const ImGuiViewport *vp = ImGui::GetMainViewport();
+	const float em = ImGui::GetFontSize();
+	const float cw = fminf(vp->Size.x - em * 3, 26 * em);
+	ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y - em * 1.5f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+	ImGui::SetNextWindowSizeConstraints(ImVec2(cw, 0), ImVec2(cw, vp->Size.y));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, em * 0.6f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(em * 1.1f, em * 0.9f));
+	ImGui::PushStyleColor(ImGuiCol_WindowBg, ui::u32(ui::surface, 0.92f));
+	ImGui::Begin("##phonehint", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+	                                       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
+	if (g_intro_done < 0) {
+		ui::heading("Playing on this phone", em * 1.05f);
+		ui::muted_wrapped("The sticks, buttons and shoulders are at the edges. The picture itself is the Vita's touch screen: tap and drag it.");
+		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("Pull down from the top of the screen for the menu."); ImGui::PopStyleColor();
+	} else {
+		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("That's it -- back to the game."); ImGui::PopStyleColor();
+	}
+	ImGui::End();
+	ImGui::PopStyleColor();
+	ImGui::PopStyleVar(2);
+}
 static void build_intro(void) {
 	const double t = g_intro_at >= 0 ? g_intro_at : ImGui::GetTime();
 	prompts_load();
@@ -1745,6 +1797,7 @@ static void build_intro(void) {
 			if (n > 0) { const int k = keys[0]; g_intro_dev = k == 1 ? DEV_KBM : k >= 20 ? DEV_TOUCH : (k >= 4 && k <= 6) ? (window_kbm_active() ? DEV_KBM : DEV_PAD) : DEV_PAD; g_intro_done = t; }
 		}
 	} else if (g_has_window && g_intro_done >= 0 && t - g_intro_done > 1.2) intro_end();   /* (a moment to see it worked, then the game) */
+	if (phone_ui()) { build_intro_hint(); return; }   /* (the strip over the running game, above) */
 	const char *pl, *pr, *pa; bool tp; int fam; pad_names(&pl, &pr, &pa, &tp, &fam);
 #ifdef __APPLE__
 	const char *alt = "Option";

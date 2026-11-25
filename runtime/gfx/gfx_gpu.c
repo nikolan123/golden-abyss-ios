@@ -369,12 +369,19 @@ static int vk_fragment_stores;   /* a Vulkan device with fragmentStoresAndAtomic
 void *gfx_gpu_create_device(void) {
 	SDL_GPUDevice *d = 0;
 #ifdef __APPLE__
-	/* Apple's Metal HUD -- frame rate, GPU time, memory, drawn by the Metal framework itself -- is switched on by
-	 * an environment variable read when the device is made, so the setting is applied here, before SDL makes one.
-	 * The menu's toggle (Performance page) says it applies at the next start for that reason. */
+#include <TargetConditionals.h>
+	/* Apple's Metal HUD -- frame rate, GPU time, memory, drawn by the Metal framework (or, on a jailbroken
+	 * *phone*, by a third-party injected dylib: libMTLHud answers the same MTL_HUD_ENABLED) -- is switched on
+	 * by an environment variable read when the device is made, so the setting is applied here, before SDL
+	 * makes one. macOS only: on an iPhone that injected HUD hooks the layer machinery itself, which broke
+	 * the touch screen in places and the orientation on an app-switcher re-entry (a device's own report,
+	 * 2026-11-26: with it off, a restart worked); a phone's stats come from the overlay's own drawn HUD
+	 * (metrics.c), which touches nothing. RECOMP_METAL_HUD forces either way (its debug value). */
+#if !TARGET_OS_IPHONE
 	{ const char *e = getenv("RECOMP_METAL_HUD");
 	  int on = e && *e ? atoi(e) != 0 : settings_int("metal_hud", 0) != 0;
 	  if (on) setenv("MTL_HUD_ENABLED", "1", 1); }
+#endif
 #endif
 #ifndef __APPLE__   /* (on Apple, Metal: SDL could otherwise find MoltenVK) */
 	if (!getenv("SDL_GPU_DRIVER") || !strcmp(getenv("SDL_GPU_DRIVER"), "vulkan")) {
