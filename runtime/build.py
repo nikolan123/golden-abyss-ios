@@ -204,7 +204,8 @@ def main(argv):
         # platform_posix.c is the same OS layer macOS and Linux use; ios_shims.m is the compiler-rt the toolchain lacks
         PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m")]
         FRAMEWORKS = [x for fr in ("UIKit Metal QuartzCore CoreGraphics CoreAudio AudioToolbox AVFoundation "
-                                   "CoreVideo CoreMotion CoreMedia CoreBluetooth Foundation GameController OpenGLES").split()
+                                   "CoreVideo CoreMotion CoreMedia CoreBluetooth Foundation GameController OpenGLES "
+                                   "VideoToolbox").split()
                       for x in ("-framework", fr)] + ["-framework", "CoreHaptics"]
         sdl_cflags = ["-I" + os.path.join(IT, "SDL3", "include")]
         sdl_libs = [os.path.join(IT, "SDL3", "lib", "libSDL3.a")] + FRAMEWORKS
@@ -347,6 +348,11 @@ def main(argv):
     # libavcodec (FFmpeg): the H.264 decoder behind sceAvcdec* (video.c) and the AAC and MP3 ones behind sceAudiodec* (audiodec.c) -- linked where pkg-config finds it
     # (Homebrew's ffmpeg, a Linux distribution's libavcodec-dev); without it movies fail to start, as before
     AVCODEC = []
+    if IOS:   # the toolchain's static FFmpeg (H.264, AAC, MP3) built with the same clang, as on Windows and Linux
+        av = os.path.join(IT, "ffmpeg")
+        if os.path.isfile(os.path.join(av, "lib", "libavcodec.a")):
+            AVCODEC = ["-DRECOMP_AVCODEC", "-I" + os.path.join(av, "include"),
+                       os.path.join(av, "lib", "libavcodec.a"), os.path.join(av, "lib", "libavutil.a")]
     if LT:   # the toolchain's static FFmpeg (H.264, AAC, MP3), as on Windows
         if os.path.isfile(os.path.join(LT, "ffmpeg", "lib", "libavcodec.a")): AVCODEC = ["-DRECOMP_AVCODEC", "-I" + os.path.join(LT, "ffmpeg", "include"), os.path.join(LT, "ffmpeg", "lib", "libavcodec.a"), os.path.join(LT, "ffmpeg", "lib", "libavutil.a")]
     elif MT:   # the Mac toolchain's static FFmpeg (H.264, AAC, MP3)
