@@ -28,6 +28,8 @@
 #include "gfx_coverage.h"
 #include "settings.h"
 #include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_main.h>   /* (last: it renames main to SDL_main. Without it iOS has no UIApplication, and
+                              * SDL says "no window ... running headless" -- which is what the first on-device run did) */
 void window_run(void *(*fn)(void *), void *arg);
 
 uint8_t *recomp_mem;
@@ -72,7 +74,19 @@ uint32_t guest_alloc(uint32_t size, uint32_t align) {
 	if (align < 16) align = 16;
 	pthread_mutex_lock(&host_lock);
 	uint32_t a = (heap_top + align - 1) & ~(align - 1);
-	if (a + size > GUEST_HEAP_END || a + size < a) heap_exhausted(size);
+	if (a + size > GUEST_HEAP_END || a + size < a) {
+		/* The console returns an error for a block that does not fit; it does not die. A game that asks for
+		 * 2 GiB (Uncharted's audio thread did, at 600 frames) gets 0 back and runs its own error path. */
+		heap_exhausted(size);
+		pthread_mutex_unlock(&host_lock);
+		return 0;
+	}
+	/* where the guest's memory went, in 64 MB steps: the only way to see a slow leak from a phone log */
+	static uint32_t logged;
+	while (a + size >= logged + (64u << 20)) {
+		logged += 64u << 20;
+		fprintf(stderr, "guest heap: %u MB used (last %u bytes at 0x%08x)\n", logged >> 20, size, a);
+	}
 	heap_top = a + size;
 	pthread_mutex_unlock(&host_lock);
 	return a;
@@ -107,10 +121,8 @@ static void summary_threads(void) {
 /* the guest heap can't give size bytes: which import asked (this thread's, mid-call) and where every thread is -- a request
  * far past any real need (AC Liberation on Windows asked for 0x80800000 as its intro video started) is a value gone wrong */
 static void heap_exhausted(uint32_t size) {
-	if (my_last && my_last->name) fprintf(stderr, "guest heap exhausted (%#x) in %s(%#x, %#x) from %#x\n", size, my_last->name, my_last->r0, my_last->r1, my_last->lr);
-	else fprintf(stderr, "guest heap exhausted (%#x)\n", size);
-	summary_threads();
-	exit(3);
+	if (my_last && my_last->name) fprintf(stderr, "guest heap: refused %#x bytes in %s(%#x, %#x) from %#x -- reported to the game, not fatal\n", size, my_last->name, my_last->r0, my_last->r1, my_last->lr);
+	else fprintf(stderr, "guest heap: refused %#x bytes -- reported to the game, not fatal\n", size);
 }
 void host_summary(const char *why);   /* window.c: the import-call histogram when the window is closed */
 
@@ -863,7 +875,169 @@ static void builtin_env(void) {
 	if (n) fprintf(stderr, "    the game's built-in settings applied: %d (its pack's RUN_ENV; RECOMP_NO_RUN_ENV=1 skips them)\n", n);
 #endif
 }
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <dirent.h>
+/* iOS: an app is launched with no arguments and no environment to set beforehand, and its working directory is not
+ * something to write to. The command line is rebuilt here from what the bundle carries -- data/game.img,
+ * data/entry.txt (the entry point, see vitarecomp's entry()), data/modules.txt (the firmware modules recompiled with
+ * the game) -- and the writable side (fs/, saves) lives in the app's Documents, with fs/app0.link naming the
+ * read-only copy inside the bundle (io.c's app0_find follows it). */
+static char ios_a0[] = "nativ";
+static char ios_a1[PATH_MAX];
+static char ios_a2[64];
+static char ios_a3[] = "100000000000";
+static char *ios_argv[5] = { ios_a0, ios_a1, ios_a2, ios_a3, NULL };
+
+static void ios_bootstrap(int *argc, char ***argv) {
+	char data[PATH_MAX], p[PATH_MAX];
+	FILE *f;
+	char work[PATH_MAX];
+	extern const char *ios_documents_dir(void);
+	const char *docs = ios_documents_dir();          /* <sandbox>/Documents/ */
+	char *pref = SDL_GetPrefPath("nativ", "nativ");   /* (the fallback: Documents/Nativ/ is the real one) */
+	char *base = SDL_GetBasePath();                  /* <bundle>/ */
+	/* everything the player can see lives under Documents: session.log, env.txt, fs/ (saves). Only Documents is
+	 * open to the Files app, and on a phone that is the only debugger there is. */
+	if (docs && *docs) snprintf(work, sizeof work, "%sNativ/", docs);
+	else if (pref) snprintf(work, sizeof work, "%s", pref);
+	else work[0] = 0;
+	if (work[0]) mkdir(work, 0755);
+	/* the sandbox's own log first: on a phone there is no terminal, and this is the only way the runtime can say
+	 * what happened. Before anything that can fail, so a crash's last lines are already in it. */
+	if (work[0]) {
+		char logp[PATH_MAX];
+		snprintf(logp, sizeof logp, "%ssession.log", work);
+		freopen(logp, "a", stdout);
+		freopen(logp, "a", stderr);
+		setvbuf(stderr, NULL, _IOLBF, 0);
+	}
+	fprintf(stderr, "=== Nativ iOS: bundle %s, sandbox %s ===\n", base ? base : "(none)", work[0] ? work : "(none)");
+	if (!base || !work[0]) { *argc = 1; return; }   /* nothing can be resolved: main() reports usage */
+
+	/* Documents/Nativ/env.txt: NAME=VALUE lines, set before anything reads them. The phone has no way to pass
+	 * an environment at launch and a 3 GB ipa is not something to rebuild for every experiment (RECOMP_GPU_ASYNC,
+	 * RECOMP_GFX, RECOMP_NO_MSPACE, RECOMP_LOG ...). Editable from the Files app. */
+	{
+		char ep[PATH_MAX];
+		snprintf(ep, sizeof ep, "%senv.txt", work);
+		if ((f = fopen(ep, "r")) != NULL) {
+			char line[512];
+			while (fgets(line, sizeof line, f)) {
+				char *eq = strchr(line, '=');
+				if (!eq || line[0] == '#') continue;
+				*eq = 0;
+				char *v = eq + 1; v[strcspn(v, "\r\n")] = 0;
+				char *k = line; while (*k == ' ' || *k == '\t') k++;
+				char *ke = k + strlen(k); while (ke > k && (ke[-1] == ' ' || ke[-1] == '\t')) *--ke = 0;
+				if (*k && *v) { setenv(k, v, 0); fprintf(stderr, "env: %s=%s\n", k, v); }
+			}
+			fclose(f);
+		}
+	}
+	snprintf(data, sizeof data, "%sdata", base);
+
+	snprintf(ios_a1, sizeof ios_a1, "%s/game.img", data);
+	snprintf(p, sizeof p, "%s/entry.txt", data);
+	ios_a2[0] = '0'; ios_a2[1] = 0;
+	if ((f = fopen(p, "r")) != NULL) { if (fgets(ios_a2, sizeof ios_a2, f)) ios_a2[strcspn(ios_a2, "\r\n ")] = 0; fclose(f); }
+
+	/* RECOMP_MODULES: the firmware modules recompiled with the game, each <data>/<name>.img */
+	snprintf(p, sizeof p, "%s/modules.txt", data);
+	if ((f = fopen(p, "r"))) {
+		static char mods[PATH_MAX * 4]; mods[0] = 0;
+		char name[128];
+		while (fscanf(f, "%127s", name) == 1) {
+			if (mods[0]) strncat(mods, ",", sizeof mods - strlen(mods) - 1);
+			char one[PATH_MAX];
+			snprintf(one, sizeof one, "%s/%s.img", data, name);
+			strncat(mods, one, sizeof mods - strlen(mods) - 1);
+		}
+		fclose(f);
+		if (mods[0]) setenv("RECOMP_MODULES", mods, 0);
+	}
+	/* the pack's shader recipes, when the bundle carries them */
+	snprintf(p, sizeof p, "%s/shaders.txt", data);
+	if (access(p, F_OK) == 0) setenv("RECOMP_SHADER_RECIPES_SHIPPED", p, 0);
+
+	/* fs/ in Documents; app0 is found, not assumed: a copy the player put there, the bundle's own, or another
+	 * installed Nativ app's bundle (the same 2.9 GB of game data is not worth downloading twice). */
+	static char fs[PATH_MAX];
+	snprintf(fs, sizeof fs, "%sfs", work);
+	mkdir(fs, 0755);
+
+	char app0[PATH_MAX] = "";
+	{   /* 1: <fs>/app0, the player's own copy */
+		char c[PATH_MAX];
+		snprintf(c, sizeof c, "%s/app0/sce_sys", fs);
+		if (access(c, F_OK) == 0) snprintf(app0, sizeof app0, "%s/app0", fs);
+	}
+	{   /* 2: the bundle's data/app0 */
+		char c[PATH_MAX];
+		snprintf(c, sizeof c, "%s/app0/sce_sys", data);
+		if (!app0[0] && access(c, F_OK) == 0) snprintf(app0, sizeof app0, "%s/app0", data);
+	}
+	if (!app0[0]) {   /* 3: a sibling app's bundle: LiveContainer keeps them side by side under Applications/,
+	                   * a normal install puts each bundle in its own <UUID>/ directory */
+		char pdir[PATH_MAX];
+		snprintf(pdir, sizeof pdir, "%s", base);
+		size_t L = strlen(pdir);
+		while (L && pdir[L - 1] == '/') pdir[--L] = 0;   /* (SDL_GetBasePath ends with a slash) */
+		char *slash = strrchr(pdir, '/');
+		if (slash) {
+			*slash = 0;
+			DIR *d = opendir(pdir);
+			if (d) {
+				struct dirent *e;
+				while ((e = readdir(d)) && !app0[0]) {
+					if (e->d_name[0] == '.') continue;
+					char c[PATH_MAX];
+					snprintf(c, sizeof c, "%s/%s/data/app0/sce_sys", pdir, e->d_name);
+					if (access(c, F_OK) == 0) { snprintf(app0, sizeof app0, "%s/%s/data/app0", pdir, e->d_name); break; }
+					/* the same, one level in: /var/containers/Bundle/Application/<UUID>/<App>.app */
+					char inner[PATH_MAX];
+					snprintf(inner, sizeof inner, "%s/%s", pdir, e->d_name);
+					DIR *d2 = opendir(inner);
+					if (!d2) continue;
+					struct dirent *e2;
+					while ((e2 = readdir(d2))) {
+						if (e2->d_name[0] == '.') continue;
+						snprintf(c, sizeof c, "%s/%s/data/app0/sce_sys", inner, e2->d_name);
+						if (access(c, F_OK) == 0) { snprintf(app0, sizeof app0, "%s/%s/data/app0", inner, e2->d_name); break; }
+					}
+					closedir(d2);
+				}
+				closedir(d);
+				if (app0[0]) fprintf(stderr, "app0: reusing the game data found beside this app\n");
+			}
+		}
+	}
+	if (!app0[0]) snprintf(app0, sizeof app0, "%s/app0", data);   /* nothing found: the bundle's, and let it fail loudly */
+	fprintf(stderr, "app0: %s\n", app0);
+
+	char link[PATH_MAX];
+	snprintf(link, sizeof link, "%s/app0.link", fs);
+	{
+		FILE *l = fopen(link, "w");
+		if (l) { fprintf(l, "%s\n", app0); fclose(l); }
+	}
+	if (chdir(work) == 0) { /* fs/ resolves under Documents from here on */ }
+	/* the bundle's data path is kept: the fs root and the game's folder are both absolute */
+
+	*argc = 4; *argv = ios_argv;
+	SDL_free(base); SDL_free(pref);
+}
+#endif
+
 int main(int argc, char **argv) {
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	ios_bootstrap(&argc, &argv);   /* iOS: the command line and the writable fs/ are made up here, from the bundle */
+#endif
 	builtin_env();
 #ifdef __linux__
 	/* RECOMP_DEBUGGABLE=1: let any process attach a debugger (Yama ptrace_scope 1 only allows the

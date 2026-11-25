@@ -19,7 +19,7 @@ void stallprof_present(void);
 #if defined(__APPLE__) && defined(__aarch64__)
 #include <dlfcn.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include <mach/vm_map.h>
 
 #define DEPTH 14
 #define MAXS 8192
@@ -32,8 +32,8 @@ static pthread_t monitor;
 
 static uint64_t now_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u; }
 static int read_words(uint64_t addr, uint64_t out[2]) {
-	mach_vm_size_t got = 0;
-	return mach_vm_read_overwrite(mach_task_self(), addr, 16, (mach_vm_address_t)out, &got) == KERN_SUCCESS && got == 16;
+	vm_size_t got = 0;   /* vm_read_overwrite, not mach_vm's: the iOS SDK has no mach_vm.h */
+	return vm_read_overwrite(mach_task_self(), (vm_address_t)addr, 16, (vm_address_t)out, &got) == KERN_SUCCESS && got == 16;
 }
 static void sample_all(thread_t self) {
 	thread_act_array_t th; mach_msg_type_number_t n;

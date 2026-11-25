@@ -77,6 +77,12 @@ static void h_alloc_block(Cpu *c) {   /* (name, type, size, opt) */
 	uint32_t size = A2, base = hole_take(page_up(size), align);
 	const int reused = base != 0;
 	if (!base) base = guest_alloc(size, align);
+	if (!base) {   /* did not fit: SCE_KERNEL_ERROR_NO_MEMORY, as the console says -- not the end of the run */
+		pthread_mutex_unlock(&block_lock);
+		fprintf(stderr, "    memblock '%s' type %#x %#x bytes: no memory (returned as an error to the game)\n", (char *)G(A0), A1, size);
+		RET(0x80020002u);
+		return;
+	}
 	blocks[slot][0] = base; blocks[slot][1] = size; block_type[slot] = A1;
 	pthread_mutex_unlock(&block_lock);
 	memset(G(base), 0, size);
