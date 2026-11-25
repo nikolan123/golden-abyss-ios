@@ -368,6 +368,14 @@ static SDL_GPUDevice *gpu(void) { return (SDL_GPUDevice *)window_gpu_device(); }
 static int vk_fragment_stores;   /* a Vulkan device with fragmentStoresAndAtomics */
 void *gfx_gpu_create_device(void) {
 	SDL_GPUDevice *d = 0;
+#ifdef __APPLE__
+	/* Apple's Metal HUD -- frame rate, GPU time, memory, drawn by the Metal framework itself -- is switched on by
+	 * an environment variable read when the device is made, so the setting is applied here, before SDL makes one.
+	 * The menu's toggle (Performance page) says it applies at the next start for that reason. */
+	{ const char *e = getenv("RECOMP_METAL_HUD");
+	  int on = e && *e ? atoi(e) != 0 : settings_int("metal_hud", 0) != 0;
+	  if (on) setenv("MTL_HUD_ENABLED", "1", 1); }
+#endif
 #ifndef __APPLE__   /* (on Apple, Metal: SDL could otherwise find MoltenVK) */
 	if (!getenv("SDL_GPU_DRIVER") || !strcmp(getenv("SDL_GPU_DRIVER"), "vulkan")) {
 		uint32_t vk10[55] = {0}; vk10[0] = 1; vk10[26] = 1;   /* VkPhysicalDeviceFeatures, 55 VkBool32 in the spec's order: [0] robustBufferAccess, [26] fragmentStoresAndAtomics */

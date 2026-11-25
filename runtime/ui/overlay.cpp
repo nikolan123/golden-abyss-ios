@@ -427,6 +427,10 @@ static void page_performance(void) {
 	{ char b[48]; unsigned shown = metrics_frame_gen_shown();   /* (frame generation: the frames shown too) */
 	  if (shown) std::snprintf(b, sizeof b, "%.0f fps, frame gen %u", metrics_fps(), shown); else std::snprintf(b, sizeof b, "%.0f fps", metrics_fps());
 	  ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f); ImGui::TextUnformatted(b); ImGui::PopFont(); }
+#ifdef __APPLE__
+	ui::row("Metal HUD", "Apple's own overlay, drawn by Metal over the game: frame rate, GPU time, memory. Applies the next time the game starts (Metal reads it when it makes the device).");
+	{ bool on = settings_int("metal_hud", 0) != 0; if (ui::toggle("mhud", &on)) { settings_set_int("metal_hud", on ? 1 : 0); settings_save(); } }
+#endif
 	ui::rows_end();
 }
 static void page_game(void) {
