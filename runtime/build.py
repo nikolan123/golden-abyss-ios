@@ -203,11 +203,12 @@ def main(argv):
         FLAGS += iosflags
         # platform_posix.c is the same OS layer macOS and Linux use; ios_shims.m is the compiler-rt the toolchain lacks
         # (the chrome: UIKit's own eye, top pull and toasts -- built for iOS alone, nothing on a desktop)
-        PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m"), os.path.join(ROOT, "runtime", "platform", "ios_ui_chrome.m")]
+        # gfx_metalfx.m: Apple's MetalFX spatial upscale at present (iOS 16+, weak-linked; RECOMP_METALFX=1)
+        PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m"), os.path.join(ROOT, "runtime", "platform", "ios_ui_chrome.m"), os.path.join(ROOT, "runtime", "gfx", "gfx_metalfx.m")]
         FRAMEWORKS = [x for fr in ("UIKit Metal QuartzCore CoreGraphics CoreAudio AudioToolbox AVFoundation "
                                    "CoreVideo CoreMotion CoreMedia CoreBluetooth Foundation GameController OpenGLES "
                                    "VideoToolbox").split()
-                      for x in ("-framework", fr)] + ["-framework", "CoreHaptics"]
+                      for x in ("-framework", fr)] + ["-framework", "CoreHaptics"] + ["-weak_framework", "MetalFX"]
         sdl_cflags = ["-I" + os.path.join(IT, "SDL3", "include")]
         sdl_libs = [os.path.join(IT, "SDL3", "lib", "libSDL3.a")] + FRAMEWORKS
     elif LT:

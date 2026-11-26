@@ -677,3 +677,40 @@ remaining physical-device checks.
   resolution -- the sharp-at-less-cost candidate to measure
   against plain 2x). Both leave with the measurement; the fence
   stats are the "where does 15 fps go" question answered.
+
+### Step 48 — MetalFX at present: the 1x frame upscaled by Apple's own scaler
+
+- The 2x measurements said the cost is linear in pixels: 1x costs
+  7.2 ms GPU busy, 2x 28.3 ms -- the whole frame at 4x pixels, so
+  no shader trick inside the frame changes the bill. FSR rendered
+  at 1x but its own passes plus the still-2x composite measured
+  slower (16-18 fps). The one upscale that costs almost nothing
+  extra is the one at present, on the final picture, once.
+- Apple ships exactly that: MetalFX spatial upscaling (the
+  iPhone's own silicon path, A15+). The game renders 960x544 and
+  [MTLFXSpatialScaler](https://developer.apple.com/documentation/metalfx/mtlfxspatialscaler)
+  turns it into the 2796x1290 drawable in one pass at present
+  time -- expected back at (or near) the 1x frame cost, which the
+  fence stats will now show.
+- SDL's GPU API wraps its Metal objects opaquely, so the port's
+  libSDL3.a is rebuilt from the SDL tree with three small exports
+  added to its Metal backend (SDL_METAL_TextureHandle, _Device-
+  Handle, _CommandBufferHandle -- /d/work/ios/SDL, not in this
+  repo; the toolchain's libSDL3.a is that build). The scaler rides
+  SDL's own command buffer, so ordering with the rest of the frame
+  is the encoder's, not ours.
+- runtime/gfx/gfx_metalfx.m creates the scaler per input/output
+  size (rotation and render-scale changes rebuild it), feeds it
+  the frame, and blits its output into the same letterbox rect the
+  plain path uses. The formats needed no conversion: frames are
+  RGBA8Unorm and the SDR swapchain BGRA8Unorm, both on the
+  scaler's supported list; Perceptual colour mode, since those
+  unorm bytes hold display-ready sRGB values. FXAA/sharpen are
+  skipped when MetalFX runs -- the scaler sharpens on its own.
+- RECOMP_METALFX=1 in this pack's RUN_ENV (the FSR render gate
+  left with the measurement). Anything unsupported -- pre-16 iOS,
+  no MetalFX, an odd source rect, framegen's already-full-size
+  frames -- falls back to the plain present path without a word.
+  Expected in the log: "metalfx: on (present-time spatial
+  upscale)", then 960x544 -> 2796x1290 with the fence stats
+  carrying the round's settings.

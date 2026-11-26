@@ -2020,6 +2020,15 @@ void window_run(void *(*fn)(void *), void *arg) {
 			 * drawn at, so the last linear step shrinks by under 2x */
 			uint32_t lv = 0;
 			if (gsrc) while (lv + 1 < gl && ph2 / (float)(2u << lv) >= dh && pw2 / (float)(2u << lv) >= dw) lv++;
+			/* MetalFX first (gfx_metalfx.m): Apple's spatial scaler upscales the whole frame
+			 * into the letterbox rect in one pass -- only when the source rect is the whole
+			 * texture (the scaler reads all of it) and it is smaller than the drawn rect;
+			 * everything else, including the scaler refusing, falls through to FXAA or the
+			 * plain scaled blit below */
+			extern int metalfx_present(SDL_GPUDevice *, SDL_GPUCommandBuffer *, SDL_GPUTexture *, uint32_t, uint32_t, SDL_GPUTexture *, uint32_t, uint32_t, uint32_t, uint32_t);
+			if (!(px <= 0.01f && py <= 0.01f && pw2 >= (float)sw - 0.01f && ph2 >= (float)sh - 0.01f
+			      && (dw > sw || dh > sh)
+			      && metalfx_present(gpu, cmd, gsrc ? gsrc : src_tex, sw, sh, swap, (Uint32)dx, (Uint32)dy, (Uint32)dw, (Uint32)dh))) {
 			/* FXAA and sharpening (post.c), or else the plain scaled blit */
 			extern int post_present(SDL_GPUDevice *, SDL_GPUCommandBuffer *, SDL_GPUTexture *, uint32_t, uint32_t, uint32_t, float, float, float, float, SDL_GPUTexture *, SDL_GPUTextureFormat, float, float, float, float);
 			if (!post_present(gpu, cmd, gsrc ? gsrc : src_tex, sw, sh, gsrc ? gl : 1, px, py, pw2, ph2, swap, SDL_GetGPUSwapchainTextureFormat(gpu, win), dx, dy, dw, dh)) {
@@ -2029,6 +2038,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 					.load_op = SDL_GPU_LOADOP_CLEAR, .clear_color = { 0, 0, 0, 1 }, .filter = SDL_GPU_FILTER_LINEAR,
 				};
 				SDL_BlitGPUTexture(cmd, &blit);
+			}
 			}
 			/* the overlay, if open, on top of the frame just blitted -- after it, on the same
 			 * swapchain texture, for both the GPU-presented path (gsrc) and the software path
