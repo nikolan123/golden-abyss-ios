@@ -226,11 +226,12 @@ static void pad_paint_cg(CGContextRef c, const TpVisual *tv, CGSize size) {
 				[l drawAtPoint:CGPointMake(b->x - ts.width * 0.5f, b->y - ts.height * 0.5f) withAttributes:at];
 			} else pad_glyph_cg(c, b->label, b->x, b->y, b->hh * 1.1f, ct);
 		} else {
-			const float dr = b->r * 0.66f;   /* the painted circle, plainly smaller than the thumb's hit box above it (the hit stays 1.18 x r; the eye gets the modest size the phone asked for) */
+			const float dr = b->r;   /* the painted circle, back at its own size (the phone's word: only the icon was oversized, not the button) */
+			const float gr = dr * 1.05f;   /* the glyph inside, smaller than the old proportions: a mark in the circle, not a badge on it */
 			CGContextSetStrokeColorWithColor(c, co.CGColor); CGContextSetLineWidth(c, 1.5f);
 			CGContextFillEllipseInRect(c, CGRectMake(b->x - dr, b->y - dr, 2 * dr, 2 * dr));
 			CGContextStrokeEllipseInRect(c, CGRectMake(b->x - dr, b->y - dr, 2 * dr, 2 * dr));
-			pad_glyph_cg(c, b->label, b->x, b->y, dr * 1.55f, ct);
+			pad_glyph_cg(c, b->label, b->x, b->y, gr, ct);
 		}
 	}
 }

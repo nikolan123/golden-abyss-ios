@@ -1896,6 +1896,7 @@ static void build_intro_hint(void) {
 		if (g_intro_since <= 0) g_intro_since = t;
 		if (g_has_window && g_intro_done < 0 && t - g_intro_since > 12) { intro_end(); return; }
 	}
+	if (g_intro_done >= 0) return;   /* dismissed (the first touch): no farewell strip -- the game simply goes on, no "That's it" to be read first */
 	const ImGuiViewport *vp = ImGui::GetMainViewport();
 	const float em = ImGui::GetFontSize();
 	const float cw = fminf(vp->Size.x - em * 3, 26 * em);

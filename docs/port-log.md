@@ -472,3 +472,18 @@ Three from the phone's report, all clean:
 - **The face buttons paint at 0.66 of their hit radius** -- the
   thumb keeps the generous invisible box, the eye gets the modest
   circle it asked for, the glyphs scaled with them.
+
+### Step 37 — the glyphs inside, no farewell, both sticks
+
+- The face buttons paint at their own size again (Step 36's shrink
+  went too far -- "the xyba are too small"); the glyphs inside are
+  the small ones now: drawn at 1.05 r where the old proportions
+  passed 1.55 -- a mark in its circle, not a badge on it.
+- The intro hint's dismissal no longer says anything: the "That's
+  it -- back to the game." strip is gone; the first touch just
+  works and the game goes on.
+- RECOMP_TOUCHPAD_RSTICK=1 in the pack: both stick pockets live by
+  default (the menu's "Second stick" toggle still overrules it).
+  The old rationale -- the game's icon bar lives where the pocket
+  is -- mattered less once taps through pockets became true taps;
+  the phone asked for both, and both it has.
