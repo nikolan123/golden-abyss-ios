@@ -829,26 +829,22 @@ int overlay_mouse_captured(void) { return g_ctx && g_has_window && g_mouse_captu
  * falls through to the game for that one closing tap. Only a *landing* finger asks: one already down
  * keeps its owner, so dragging a thumb from a control over the bar never steals it. */
 /* the phone's top strip, handled natively -- a finger event asks this directly, never through
- * SDL's synthesized "mouse from touch" (which the plist of Step 20 turned off on some devices:
- * every ImGui chip and pull on the glass went dead with it, "a circle that does absolutely
- * nothing"). Three things answer: the controls chip (its tap flips the pad, live), the pull tab
- * while it shows (its tap brings the bar), and a pull from the bare top edge -- the strip above
- * ~9 points belongs to nobody: the shoulders begin at the margins below it. A bar menu that is
- * open answers first (its tap closes it: overlay_owns_point's turn), and while the bar is down
- * the bar owns its strip. */
-static float g_chip[4];   /* the chip's rect as last built (x0..y1): build_pad_toggle fills it */
+ * SDL's synthesized "mouse from touch" (which the plist of Step 20 once turned off: every ImGui
+ * chip and pull on the glass went dead with it). Two things answer: the pull tab while it shows
+ * (its tap brings the bar), and a pull from the bare top edge -- the strip above ~9 points belongs
+ * to nobody: the shoulders begin at the margins below it. The controls chip is ImGui's own
+ * button (its one tap; a native twin made it fire twice). A bar menu that is open answers first
+ * (its tap closes it: overlay_owns_point's turn), and while the bar is down the bar owns its strip. */
+static float g_chip[4];   /* the chip's rect as last built (x0..y1): build_pad_toggle fills it, for the debug story */
 extern "C" int overlay_finger_nav(float x, float y) {
 	if (!g_ctx || !g_has_window || !phone_ui() || g_open || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) return 0;
 	ImGui::SetCurrentContext(g_ctx);
 	ImGuiIO &io = ImGui::GetIO();
 	const double t = ImGui::GetTime();
 	const bool bar_away = g_bar_vis <= 0.01f;
-	if (bar_away && g_chip[0] < g_chip[2] && x >= g_chip[0] && x <= g_chip[2] && y >= g_chip[1] && y <= g_chip[3]) {   /* the chip */
-		const bool on = touchpad_on();
-		touchpad_set_on(on ? 0 : 1);
-		overlay_toast_titled(on ? "Controls off" : "Controls on", on ? "The chip brings them back." : "", 2.4);
-		return 1;
-	}
+	/* (the chip? its tap is ImGui's own again -- the plist key's removal gave the synthesized mouse
+	 * back, and one tap there fired both paths at once, "controls off" and "controls on" in one
+	 * flick -- the chip is one button, in one place) */
 	if (bar_away && g_tab_a > 0.05f && y <= 20.0f && x >= io.DisplaySize.x * 0.5f - 55.0f && x <= io.DisplaySize.x * 0.5f + 55.0f) {   /* the pull tab, while it shows */
 		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
 		return 1;
@@ -1053,18 +1049,20 @@ static void build_tab(float w, double t) {
 	ImGui::End();
 	ImGui::PopStyleVar(3);
 }
-/* the phone's own request, found the hard way: controls to turn the controls off and on, right there
- * on the glass. A small chip beside the pull tab (the one corner of the top strip nothing else wants,
- * and beside the thing it belongs to), always drawn -- even with the pad hidden, that being its
- * point -- an outlined stick that is slashed when the pad is off. A tap flips touchpad live (the
- * toggle obeys since the cache invalidates), a toast says what happened, and the pad's own fingers
- * keep the rest of the screen. While the bar is down it makes way: the bar's Game menu holds the
+/* the controls chip: a small, dim eye -- the phone's own request -- tucked into the top-left
+ * corner, beside the shoulder pill, out of every game's way (the top centre belongs to the pull
+ * tab and the game's banners; the right edge to the icon bar). Always drawn, even with the pad
+ * off -- that being its point: a tap flips the pad live, the eye is open while they show and
+ * slashed when they don't. Its tap is ImGui's (the chip's native twin was the double toggle of
+ * Step 22's first try); while the bar is down it makes way, the bar's Controls menu holds the
  * same switch among all the others. */
 static void build_pad_toggle(float w) {
+	(void)w;
 	if (!phone_ui()) return;
-	const float tw = 110;                                  /* (the pull tab beside it, its phone width) */
-	const float cw = 46, ch = 24, x0 = w * 0.5f + tw * 0.5f + 12;
-	ImGui::SetNextWindowPos(ImVec2(x0, 0));
+	const TpVisual *tv = touchpad_visuals();
+	const float pill = tv && tv->nb >= 6 ? (tv->mirror ? tv->b[5].x + tv->b[5].hw : tv->b[4].x + tv->b[4].hw) : 0.0f;   /* the top strip's leftmost pill, whichever side L is on */
+	const float cw = 40, ch = 22, x0 = pill + 8, y0 = 1;
+	ImGui::SetNextWindowPos(ImVec2(x0, y0));
 	ImGui::SetNextWindowSize(ImVec2(cw, ch));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0, 0));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1074,26 +1072,24 @@ static void build_pad_toggle(float w) {
 		const bool on = touchpad_on();
 		if (ImGui::InvisibleButton("pad", ImVec2(cw, ch))) {
 			touchpad_set_on(on ? 0 : 1);
-			overlay_toast_titled(on ? "Controls off" : "Controls on", on ? "The chip brings them back." : "", 2.4);
+			overlay_toast_titled(on ? "Controls off" : "Controls on", on ? "The eye brings them back." : "", 2.4);
 		}
 		const bool hov = ImGui::IsItemHovered();
 		ImDrawList *dl = ImGui::GetForegroundDrawList();
 		const ImVec2 p0 = ImGui::GetItemRectMin(), p1 = ImGui::GetItemRectMax();
-		g_chip[0] = p0.x; g_chip[1] = p0.y; g_chip[2] = p1.x; g_chip[3] = p1.y;   /* (overlay_finger_nav's native tap needs the same rect) */
-		const ImU32 bg = IM_COL32(30, 30, 36, (int)((hov ? 0.90f : 0.66f) * 255));
-		dl->AddRectFilled(p0, p1, bg, ch * 0.42f, ImDrawFlags_RoundCornersBottom);
-		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, (int)(hov ? 0.28f * 255 : 0.12f * 255)), ch * 0.42f, 1.0f, ImDrawFlags_RoundCornersBottom);
-		const ImVec2 c((p0.x + p1.x) * 0.5f, p0.y + ch * 0.54f);
-		const float r = ch * 0.27f;
-		const ImU32 icon = on ? IM_COL32(235, 240, 255, 235) : IM_COL32(150, 156, 172, 190);
-		if (on) {
-			dl->AddCircle(c, r, icon, 24, 1.6f);
-			dl->AddCircleFilled(c, r * 0.40f, icon);
-		} else {
-			dl->AddCircle(c, r, icon, 24, 1.4f);
-			dl->AddCircle(c, r * 0.40f, icon, 16, 1.2f);
-			const float d = r * 1.55f;
-			dl->AddLine(ImVec2(c.x - d, c.y + d), ImVec2(c.x + d, c.y - d), icon, 1.6f);
+		g_chip[0] = p0.x; g_chip[1] = p0.y; g_chip[2] = p1.x; g_chip[3] = p1.y;   /* (kept for the debug story; the tap itself is ImGui's) */
+		dl->AddRectFilled(p0, p1, IM_COL32(30, 30, 36, (int)(on ? (hov ? 0.80f : 0.62f) * 255 : (hov ? 0.62f : 0.44f) * 255)), ch * 0.45f);
+		/* the eye: an almond of two arcs and a pupil, small enough not to be seen until looked for */
+		const ImVec2 c((p0.x + p1.x) * 0.5f, p0.y + ch * 0.55f);
+		const float ew = ch * 0.40f, eh = ch * 0.26f;
+		const ImU32 icon = on ? IM_COL32(235, 240, 255, 225) : IM_COL32(150, 156, 172, 200);
+		dl->PathLineTo(ImVec2(c.x - ew, c.y)); dl->PathBezierQuadraticCurveTo(ImVec2(c.x, c.y - eh * 2.0f), ImVec2(c.x + ew, c.y), 12); dl->PathLineTo(ImVec2(c.x + ew, c.y));
+		dl->PathBezierQuadraticCurveTo(ImVec2(c.x, c.y + eh * 2.0f), ImVec2(c.x - ew, c.y), 12); dl->PathStroke(icon, 0, 1.4f);
+		if (on) dl->AddCircleFilled(c, eh * 0.62f, icon);
+		else {
+			dl->AddCircle(c, eh * 0.62f, icon, 12, 1.1f);
+			const float d = ch * 0.42f;
+			dl->AddLine(ImVec2(c.x - d, c.y + d), ImVec2(c.x + d, c.y - d), icon, 1.4f);
 		}
 	}
 	ImGui::End();
@@ -1860,7 +1856,7 @@ static void build_intro_hint(void) {
 	if (g_intro_done < 0) {
 		ui::heading("Playing on this phone", em * 1.05f);
 		ui::muted_wrapped("The sticks, buttons and shoulders are at the edges. The picture itself is the Vita's touch screen: tap and drag it.");
-		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("Pull down from the top for the menu. The chip up there turns these controls off and on."); ImGui::PopStyleColor();
+		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("Pull down from the top for the menu. The little eye at the top left turns these controls off and on."); ImGui::PopStyleColor();
 	} else {
 		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("That's it -- back to the game."); ImGui::PopStyleColor();
 	}

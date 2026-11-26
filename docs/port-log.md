@@ -154,3 +154,20 @@ Two changes:
 The fingers' full routing, with RECOMP_PAD_DEBUG=1 logging each: the
 overlay's own gesture (chip/tab/pull) > the overlay's own tap (bar
 and menus, dialogs) > a named pad control > the game's touch panel.
+
+### Step 23 — the eye in the corner, and one tap per tap
+
+test12's report was the confirmation the plist theory needed: the pull
+worked again (the synthesized mouse was back the moment its Step 20
+killer left the plist), and the chip's single tap fired *twice* --
+"controls off" and "controls on" in one flick, the pad flashing -- the
+native handler and the ImGui button both answering the same finger.
+
+The chip is ImGui's one button now (the native twin is gone; only the
+pull tab and the bare top-edge pull still answer finger events
+natively). It also moved, per the phone's own design eye: out of the
+top centre (the pull tab's place, and the banners') and into the top
+left corner, beside the shoulder pill (the side flips with the
+left-handed layout's), as a small, dim eye -- open while the controls
+show, slashed when they don't -- half the size, most of the showiness
+gone: "small opaque eye".
