@@ -103,6 +103,7 @@ static void eye_look(void) {
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)ev {
 	(void)ev;
 	if (!touchpad_on() || overlay_is_open()) return NO;
+	if (overlay_pad_hidden()) return NO;   /* the bar's down, a menu, a dialog (Step 34's bits): whatever made the picture stand down stands its touches down -- the tabs sit on the pills' zone, and a menu must be pressable */
 	{	/* wherever ImGui owns the point, the finger is its (a menu over the shoulders, a dialog):
 		 * fall through as though this control were not here -- the exact behaviour the tap used to have.
 		 * And the window's low 14 points are navigation's own, always: a pull or a tap there is never a button */
@@ -220,16 +221,16 @@ static void pad_paint_cg(CGContextRef c, const TpVisual *tv, CGSize size) {
 			if (b->label == TP_LABEL_L || b->label == TP_LABEL_R) {
 				NSString *l = [NSString stringWithUTF8String:(b->label == TP_LABEL_L ? "L" : "R")];
 				UIFont *f = [UIFont systemFontOfSize:b->hh * 1.05f weight:UIFontWeightMedium];
-				NSMutableParagraphStyle *st = [[NSMutableParagraphStyle new] autorelease];
-				st.alignment = NSTextAlignmentCenter;
-				NSDictionary *at = @{NSFontAttributeName: f, NSForegroundColorAttributeName: ct, NSParagraphStyleAttributeName: st};
-				[l drawInRect:CGRectMake(b->x - b->hw, b->y - b->hh, 2 * b->hw, 2 * b->hh) withAttributes:at];
+				NSDictionary *at = @{NSFontAttributeName: f, NSForegroundColorAttributeName: ct};
+				const CGSize ts = [l sizeWithAttributes:at];   /* drawInRect hangs a line from the rect's top: centering is measured, not asked */
+				[l drawAtPoint:CGPointMake(b->x - ts.width * 0.5f, b->y - ts.height * 0.5f) withAttributes:at];
 			} else pad_glyph_cg(c, b->label, b->x, b->y, b->hh * 1.1f, ct);
 		} else {
+			const float dr = b->r * 0.66f;   /* the painted circle, plainly smaller than the thumb's hit box above it (the hit stays 1.18 x r; the eye gets the modest size the phone asked for) */
 			CGContextSetStrokeColorWithColor(c, co.CGColor); CGContextSetLineWidth(c, 1.5f);
-			CGContextFillEllipseInRect(c, CGRectMake(b->x - b->r, b->y - b->r, 2 * b->r, 2 * b->r));
-			CGContextStrokeEllipseInRect(c, CGRectMake(b->x - b->r, b->y - b->r, 2 * b->r, 2 * b->r));
-			pad_glyph_cg(c, b->label, b->x, b->y, b->r * 1.55f, ct);
+			CGContextFillEllipseInRect(c, CGRectMake(b->x - dr, b->y - dr, 2 * dr, 2 * dr));
+			CGContextStrokeEllipseInRect(c, CGRectMake(b->x - dr, b->y - dr, 2 * dr, 2 * dr));
+			pad_glyph_cg(c, b->label, b->x, b->y, dr * 1.55f, ct);
 		}
 	}
 }

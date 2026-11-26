@@ -454,3 +454,21 @@ it printed is verified, and the log needs the quiet.
 The pads' *intended* proportions have never actually been seen on
 the glass yet -- every native picture so far was the torn one.
 What test25 shows is the first honest look at the painter's shapes.
+
+### Step 36 — the menu gets its taps, the letters their centre, the glyphs their size
+
+Three from the phone's report, all clean:
+
+- **A bar down stands the pad's touches down, not just its pixels.**
+  The bar's tabs sit exactly in the shoulder pills' zone; tapping
+  "Controls" was landing on the L pill underneath. PadBtn now
+  consults overlay_pad_hidden alongside the picture -- whatever
+  made the pixels stand down stands the hit areas down too, so a
+  menu is pressable everywhere it appears.
+- **L and R centre their letters by measurement**: drawInRect
+  hangs a line from the top of its rect, never the middle -- the
+  letters sat visibly low in their pills. sizeWithAttributes now
+  places them on the button's own centre.
+- **The face buttons paint at 0.66 of their hit radius** -- the
+  thumb keeps the generous invisible box, the eye gets the modest
+  circle it asked for, the glyphs scaled with them.
