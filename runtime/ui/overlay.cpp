@@ -1697,9 +1697,9 @@ static void build_closed(void) {
 		if (g_bar_want && t - g_bar_active_t > HIDE_S) g_bar_want = false;
 		/* the pull tab: with the pointer near the top while the bar is away, and with the hint */
 		const bool near_top = inside && m.y < TAB_NEAR_PX;
-		/* (a phone's own report on the tab fading in only near the top -- "I had to first trigger then
-		 * pull, and it was good like that": that stays; the always-there chip beside it -- build_pad_toggle --
-		 * is for the controls, and the talk box below explains itself) */
+		/* (a phone reports the tab useful only when it fades in near the top edge: that stays;
+		 * the always-there chip beside it -- build_pad_toggle -- is for the controls, and the
+		 * talk box below explains itself) */
 		const float tab_target = (near_top || t < g_toast_until) && g_bar_vis <= 0.01f ? 1.0f : 0.0f;
 		g_tab_a += (tab_target - g_tab_a) * (dt > 0.1f ? 1.0f : dt * 8.0f);
 		if ((tab_target == 0.0f && g_tab_a < 0.02f) || g_bar_vis > 0.01f) g_tab_a = 0;   /* (gone at once as the bar arrives: the two never overlap) */
@@ -1979,7 +1979,7 @@ static void intro_demo(ImDrawList *dl, int dev, bool on, int fam, ImVec2 p, floa
 	}
 }
 /* the phone's touch hint (g_intro): the old card filled the screen over a *paused* game, teaching
- * what five seconds of running game would -- "useless", as the phone itself put it. This is a small
+ * what five seconds of running game would teach better. This is a small
  * strip at the bottom centre instead: no pause, no modal, taps fall through it to the running game
  * (NoInputs), the corner controls sit clear of it, and the first touch anywhere -- or twelve seconds
  * -- puts it away for good (intro_end writes touch_intro_shown). Between the dismissal and this card's

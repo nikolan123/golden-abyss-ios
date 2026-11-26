@@ -397,7 +397,8 @@ void ios_ui_haptic(int kind) {
 /* The whole daily surface of the ImGui overlay -- pull-down bar and its three menus -- built as UIKit's
  * own: a strip with three tabs, each opening a panel of rows below it, every row driving the exact
  * function the ImGui row drove (overlay.cpp's native handles, no new state invented). While the chrome
- * is up: taps in the top strip's middle band (and only there -- "so L and R don't misstrigger it")
+ * is up: taps in the top strip's middle band (and only there, so the shoulder buttons at the corners
+ * never mis-trigger it)
  * slide the strip down; a tab holds its panel; a tap anywhere else closes both; the pad and its touches
  * stand down while the strip is up, exactly as the ImGui bar's bit did. The ImGui bar and its pull tab
  * build never (overlay.cpp gates them on ios_ui_chrome_active); RECOMP_NATIVE_CHROME=0 restores all of it. */
