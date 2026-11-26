@@ -6614,9 +6614,13 @@ static void fence_mark(int present) {
 }
 static void fence_stats_report(const char *why) {
 	uint64_t now = us_now(); if (!fmst.last_report) fmst.last_report = now;
-	fprintf(stderr, "    gpu fence (%s): %u frames done, gpu busy %.1f ms/frame (max %.1f), %.0f%% of %.2f s busy (%u marks), present submit->done latency avg %.1f ms (max %.1f), frames in flight at present avg %.2f (max %llu)\n",
+	/* the round's settings ride along (render scale, the AA mode, the world target's boost): a
+	 * measurement session can flip them in any order and the log still says what each second was */
+	const char *aa = fsr_on() ? (fsr_upscaling() ? "fsr(renders 1x)" : "fsr") : "off";
+	fprintf(stderr, "    gpu fence (%s): %u frames done, gpu busy %.1f ms/frame (max %.1f), %.0f%% of %.2f s busy (%u marks), present submit->done latency avg %.1f ms (max %.1f), frames in flight at present avg %.2f (max %llu) [render %dx, aa %s, full-res world %s]\n",
 	        why, fmst.nframes, fmst.nframes ? fmst.acc_busy / 1e3 / fmst.nframes : fmst.acc_busy / 1e3, fmst.max_frame / 1e3, now > fmst.last_report ? 100.0 * fmst.acc_busy / (double)(now - fmst.last_report) : 0.0, (now - fmst.last_report) / 1e6, fmst.nmarks,
-	        fmst.nframes ? fmst.acc_lat / 1e3 / fmst.nframes : 0.0, fmst.max_lat / 1e3, fmst.npresent ? (double)fmst.acc_inflight / fmst.npresent : 0.0, (unsigned long long)fmst.max_inflight);
+	        fmst.nframes ? fmst.acc_lat / 1e3 / fmst.nframes : 0.0, fmst.max_lat / 1e3, fmst.npresent ? (double)fmst.acc_inflight / fmst.npresent : 0.0, (unsigned long long)fmst.max_inflight,
+	        rscale, aa, settings_int("full_res_world", 1) ? "on" : "off");
 	fmst.last_report = now; fmst.acc_busy = fmst.max_frame = fmst.acc_lat = fmst.max_lat = fmst.acc_inflight = fmst.max_inflight = 0; fmst.nframes = fmst.nmarks = fmst.npresent = 0;
 }
 static void fence_stats_present(void) {
