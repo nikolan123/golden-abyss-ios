@@ -325,3 +325,27 @@ The finger-routing debug stays in the pack this one round: its
 presence is the proof -- test18's log never once said "the game's
 touch panel", and test19's must say it everywhere the controls
 aren't.
+
+### Step 30 — the canvas that drew nothing: where the chrome lived
+
+test19's log cleared the machine: every finger routed itself
+correctly (the panel got its taps by the dozen, buttons taken only
+inside their frames, sticks spawning with their soft haptic), the
+pad's hidden-bits were 0 -- and still the buttons drew nothing, while
+the ImGui bar over the very same glass did. Touches proved the
+window live and the views on top; nothing proved any native pixel
+had ever reached the screen (the eye was never confirmed either,
+in three rounds of chrome).
+
+The one difference from every working overlay app: the chrome hung
+off the *window*, a sibling of SDL's root view -- so test20 moves it
+inside `rootViewController.view`, the same view the game's Metal
+content lives in, added after it (above in both compositing and
+hit-testing, the way any overlay view over a game is actually
+built). And the round is self-proving either way: the canvas logs
+its first draw, the tick's line carries a running draw count, and an
+amber square -- pure UIKit, none of the pad's state -- sits under
+the top bar's centre (RECOMP_PAD_CANVAS_DEBUG=0 takes it off).
+Seeing the square with buttons painted says the move fixed it;
+seeing nothing with the draw count climbing would say compositing
+still, and the next move is written from that.

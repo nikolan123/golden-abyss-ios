@@ -34,6 +34,7 @@ extern void touchpad_native_release(int which);
 void ios_ui_haptic(int kind);                    /* this file's own: 0 light, 1 medium, 2 soft */
 
 static UIWindow      *g_win;
+static UIView        *g_host;        /* where the chrome lives: the root view controller's view (the same view SDL's Metal content lives in; added after, composited and hit-tested above) */
 static UIButton     *g_eye;          /* owned by the window (installed once, never removed) */
 static UIView       *g_toast_host;   /* the corner the toasts stack into, owned the same way */
 static UIStackView  *g_toast_stack;  /* the toasts, newest on top, the oldest past three */
@@ -41,6 +42,7 @@ static int           g_installed;    /* ios_ui_chrome_install ran: everything's 
 static int           g_eye_on = -1;  /* what the eye last drew: the menu's toggle must reach it too */
 static int           g_pad_hidden = -1;   /* what the pad last showed under: 0 over the game, 1 under a menu, set hidden to match */
 static int           g_pad_disabled;      /* RECOMP_NATIVE_PAD=0: the native pad stands down (the ImGui pad draws, the finger path owns the taps) */
+int g_pad_draws;                          /* how many times the canvas has actually drawn (the tick's line says it) */
 
 /* while the chrome is installed this is the pad's own word: overlay.cpp gates pad_draw on it, so
  * a disabled native pad is the *whole* ImGui pad exactly as before, not a blank screen */
@@ -187,8 +189,24 @@ static void pad_glyph_cg(CGContextRef c, int label, float cx, float cy, float r,
 - (void)drawRect:(CGRect)rect {
 	(void)rect;
 	const TpVisual *tv = touchpad_visuals();
-	if (!tv->on || !tv->nb || overlay_pad_hidden()) return;
+	if (!tv->on) return;
+	{
+		g_pad_draws++;
+		static int said;
+		if (!said) { said = 1; chrome_log("    chrome: canvas drew (bounds %.0fx%.0f, opacity %.2f)", self.bounds.size.width, self.bounds.size.height, tv->opacity / 100.0f); }
+	}
 	CGContextRef c = UIGraphicsGetCurrentContext();
+	{	/* RECOMP_PAD_CANVAS_DEBUG (default this round; =0 takes it off): an amber square under the
+	 * top bar's centre, pure UIKit, none of the pad's state -- seeing it says the canvas composites;
+	 * not seeing it says compositing, before anything about shapes or paths */
+		static int want = -1;
+		if (want < 0) { const char *e = getenv("RECOMP_PAD_CANVAS_DEBUG"); want = !(e && e[0] == '0' && e[1] == '\0'); }
+		if (want) {
+			CGContextSetFillColorWithColor(c, [UIColor colorWithRed:1.0f green:0.73f blue:0.28f alpha:0.85f].CGColor);
+			CGContextFillRect(c, CGRectMake(self.bounds.size.width * 0.5f - 16.0f, 44.0f, 32.0f, 32.0f));
+		}
+	}
+	if (!tv->nb || overlay_pad_hidden()) return;
 	const float a = (tv->opacity < 0 ? 0 : tv->opacity > 100 ? 100 : tv->opacity) / 100.0f;
 	UIColor *fill = rgba(12, 14, 18, 0.55f * a), *ring = rgba(235, 240, 255, 0.75f * a);
 	UIColor *text = rgba(235, 240, 255, 0.90f * a), *hot = rgba(255, 255, 255, a);
@@ -286,8 +304,8 @@ void ios_ui_pad_layout(void) {
 			if (!tv->on || i >= tv->nb) continue;
 			v = [[PadBtn alloc] initWithFrame:CGRectZero];
 			v->idx = i;
-			[g_win addSubview:v];
-			[v release];   /* the window owns it */
+			[g_host addSubview:v];
+			[v release];   /* the host owns it */
 			g_pad_hits[i] = v;
 		}
 		if (!tv->on || i >= tv->nb) { v.hidden = YES; v->down = 0; continue; }
@@ -368,8 +386,8 @@ static ChromeCenter *g_center;
 			char held[16]; int n = 0;
 			for (int i = 0; tv->on && i < tv->nb && i < 8; i++) held[n++] = g_pad_hits[i] && g_pad_hits[i]->down ? '0' + i : '.';
 			held[n] = 0;
-			chrome_log("    chrome: hidden bits %d, pad %s, sticks %s%s, held [%s]", overlay_pad_hidden(), on ? "on" : "off",
-			           tv->sl_active ? "L" : "-", tv->sr_active ? "R" : "-", tv->on ? held : "-");
+			chrome_log("    chrome: hidden bits %d, pad %s, sticks %s%s, held [%s], drew %d", overlay_pad_hidden(), on ? "on" : "off",
+			           tv->sl_active ? "L" : "-", tv->sr_active ? "R" : "-", tv->on ? held : "-", g_pad_draws);
 			(void)said_eye;
 		}
 	}
@@ -452,11 +470,18 @@ void ios_ui_chrome_install(void) {
 	UIWindow *win = chrome_window();
 	if (!win) { chrome_log("    chrome: no window to install into (the ImGui chrome keeps the phone)"); return;   /* nothing to hang from yet */ }
 	g_win = win;
+	{	/* where the chrome lives: inside SDL's own root view (the view its Metal content lives in --
+	 * a sibling added after the game, so above it in both compositing and hit-testing). The window
+	 * itself also carries the pull recognizer: it sees every touch without being anyone's target. */
+		g_host = win.rootViewController.view;
+		if (!g_host) g_host = win;
+	}
 	{
 		const char *np = getenv("RECOMP_NATIVE_PAD");   /* =0: the native pad never comes up (the ImGui pad and the finger path again) */
 		g_pad_disabled = np && np[0] == '0' && np[1] == '\0';
 	}
-	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds, pad %s)", win, win.bounds.size.width, win.bounds.size.height, g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
+	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p %@, %d subviews; pad %s)", win, win.bounds.size.width, win.bounds.size.height,
+	           g_host, [g_host class], (int)g_host.subviews.count, g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
 
 	g_center = [[ChromeCenter alloc] init];   /* kept: UIKit's targets and delegates don't retain */
 	g_eye = [[UIButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
@@ -465,9 +490,9 @@ void ios_ui_chrome_install(void) {
 	g_eye.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.24f].CGColor;   /* the chip's hairline */
 	g_eye.layer.borderWidth = 0.5f;
 	[g_eye addTarget:g_center action:@selector(eye:) forControlEvents:UIControlEventTouchUpInside];
-	[win addSubview:g_eye];
-	[win bringSubviewToFront:g_eye];
-	[g_eye release];   /* the window owns it from here */
+	[g_host addSubview:g_eye];
+	[g_host bringSubviewToFront:g_eye];
+	[g_eye release];   /* the host owns it from here */
 	g_eye_on = -1; eye_look();
 
 	TopPull *pull = [[TopPull alloc] initWithTarget:g_center action:@selector(pulled:)];
@@ -478,23 +503,23 @@ void ios_ui_chrome_install(void) {
 	{	/* the pad: its picture (a full-screen canvas, synced by the display link) and its touch
 		 * areas (picked up by tp_layout's own call, ios_ui_pad_layout, as its numbers change) */
 		memset(g_pad_hits, 0, sizeof g_pad_hits);
-		g_pad_layer = [[PadLayer alloc] initWithFrame:win.bounds];
+		g_pad_layer = [[PadLayer alloc] initWithFrame:g_host.bounds];
 		g_pad_layer.userInteractionEnabled = NO;   /* touches fall through to the game, always */
 		g_pad_layer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 		g_pad_layer.hidden = YES;   /* until tp_layout says the pad is on */
-		[win addSubview:g_pad_layer];
-		[g_pad_layer release];   /* the window owns it */
+		[g_host addSubview:g_pad_layer];
+		[g_pad_layer release];   /* the host owns it */
 	}
 
 	g_toast_host = [[UIView alloc] initWithFrame:CGRectZero];
 	g_toast_host.userInteractionEnabled = NO;   /* the corner they stack in never takes a touch */
 	g_toast_host.translatesAutoresizingMaskIntoConstraints = NO;
-	[win addSubview:g_toast_host];
-	[g_toast_host.topAnchor constraintEqualToAnchor:win.safeAreaLayoutGuide.topAnchor constant:8.0f].active = YES;
-	[g_toast_host.trailingAnchor constraintEqualToAnchor:win.safeAreaLayoutGuide.trailingAnchor constant:-10.0f].active = YES;
+	[g_host addSubview:g_toast_host];
+	[g_toast_host.topAnchor constraintEqualToAnchor:g_host.safeAreaLayoutGuide.topAnchor constant:8.0f].active = YES;
+	[g_toast_host.trailingAnchor constraintEqualToAnchor:g_host.safeAreaLayoutGuide.trailingAnchor constant:-10.0f].active = YES;
 	[g_toast_host.widthAnchor constraintEqualToConstant:300.0f].active = YES;
-	[g_toast_host.bottomAnchor constraintLessThanOrEqualToAnchor:win.centerYAnchor].active = YES;
-	[g_toast_host release];   /* as above: the window owns it */
+	[g_toast_host.bottomAnchor constraintLessThanOrEqualToAnchor:g_host.centerYAnchor].active = YES;
+	[g_toast_host release];   /* as above: the host owns it */
 
 	g_toast_stack = [[UIStackView alloc] initWithFrame:CGRectZero];
 	g_toast_stack.axis = UILayoutConstraintAxisVertical;
