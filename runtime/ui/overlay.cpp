@@ -83,10 +83,12 @@ static int phone_ui(void) {
 #if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 extern "C" int  ios_ui_chrome_active(void);
 extern "C" int  ios_ui_chrome_pad_on(void);      /* the native pad's own word: pad_draw stands down only while it draws */
+extern "C" void ios_ui_bar_open(void);           /* the native menu strip slides down (ios_ui_chrome.m's own bar) */
 extern "C" void ios_ui_chrome_toast(const char *title, const char *body, double seconds);
 #else
 static inline int  ios_ui_chrome_active(void) { return 0; }
 static inline int  ios_ui_chrome_pad_on(void) { return 0; }
+static inline void ios_ui_bar_open(void) {}
 static inline void ios_ui_chrome_toast(const char *, const char *, double) {}
 #endif
 
@@ -864,12 +866,16 @@ extern "C" int overlay_finger_nav(float x, float y) {
 	/* (the chip? its tap is ImGui's own again -- the plist key's removal gave the synthesized mouse
 	 * back, and one tap there fired both paths at once, "controls off" and "controls on" in one
 	 * flick -- the chip is one button, in one place) */
-	if (bar_away && g_tab_a > 0.05f && y <= 20.0f && x >= io.DisplaySize.x * 0.5f - 55.0f && x <= io.DisplaySize.x * 0.5f + 55.0f) {   /* the pull tab, while it shows */
+	if (bar_away && g_tab_a > 0.05f && !ios_ui_chrome_active() && y <= 20.0f && x >= io.DisplaySize.x * 0.5f - 55.0f && x <= io.DisplaySize.x * 0.5f + 55.0f) {   /* the pull tab, while it shows (the native twin hides it: its own strip answers instead) */
 		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
 		return 1;
 	}
-	if (bar_away && y <= 14.0f) {   /* a pull from the very top edge: the bar comes down (the strip's low 14 points: the pad's native touch areas step out of this band too) */
-		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
+	/* the strip, the middle band only -- the phone's own ask ("so L and R don't misstrigger it"):
+	 * the shoulders live in the outer thirds, and this is not theirs. The native chrome takes it
+	 * while installed; the ImGui bar otherwise */
+	if (bar_away && y <= 14.0f && x >= io.DisplaySize.x * 0.5f - 140.0f && x <= io.DisplaySize.x * 0.5f + 140.0f) {
+		if (ios_ui_chrome_active()) ios_ui_bar_open();   /* (ios_ui_chrome.m's own strip slides) */
+		else { g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t; }
 		return 1;
 	}
 	return 0;
@@ -1027,9 +1033,23 @@ static void menu_help(void) {
 	if (ImGui::MenuItem("Shortcuts…")) open_page(TAB_HELP);
 	if (ImGui::MenuItem("About…")) open_page(TAB_HELP);
 }
+/* the native bar's own handles (ios_ui_chrome.m calls these; every one the same action the ImGui
+ * menu row took, no new state invented) */
+extern "C" {
+	float overlay_volume(void) { prefs_load(); return P.vol; }
+	void overlay_set_volume(float v) { set_volume(v); }
+	int overlay_frame_rate_wanted(void) { prefs_load(); return P.fr; }
+	void overlay_frame_rate_request(int fr) { set_frame_rate(fr); }
+	int overlay_frame_rate_offered(void) { return game_option("frame_rate") ? 1 : 0; }
+	void overlay_request_quit(void) { g_want_quit = true; }
+	int overlay_stats_level(void) { return metrics_osd_level(); }
+	void overlay_set_stats(int level) { set_osd(level); }
+	void overlay_show_controls_page(void) { open_page(TAB_CONTROLS); }
+}
 /* the bar: a window the width of the display, exactly one menu-bar high, parked above the top edge by
  * (1 - vis) of its height -- the slide. Its menus are ImGui popups below it. */
 static void build_bar(float w) {
+	if (phone_ui() && ios_ui_chrome_active()) { g_bar_h = 0; return; }   /* the native strip owns the top (ios_ui_chrome.m): the ImGui bar builds never */
 	if (phone_ui()) ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetFontSize() * 0.55f, ImGui::GetFontSize() * 0.75f));   /* a phone: rows a finger lands in */
 	const float h = ImGui::GetFrameHeight();
 	g_bar_h = h;
@@ -1067,6 +1087,7 @@ static void build_bar(float w) {
 /* the pull tab: a small rounded tongue at the top centre with a chevron, in a window of its own size so
  * it's hoverable and tappable (touch has no top-edge hover); a tap brings the bar down and pins it a while */
 static void build_tab(float w, double t) {
+	if (phone_ui() && ios_ui_chrome_active()) { g_tab_a = 0; return; }   /* the native strip replaces the tab: no triangle but its own affordance */
 	const float tw = phone_ui() ? 110 : 72, th = phone_ui() ? 20 : 14;   /* a phone: a thumb finds it blind */
 	ImGui::SetNextWindowPos(ImVec2(w * 0.5f - tw * 0.5f, 0));
 	ImGui::SetNextWindowSize(ImVec2(tw, th));

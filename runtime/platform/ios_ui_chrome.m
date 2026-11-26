@@ -23,8 +23,7 @@
 #include "../ui/touchpad.h"   /* runtime/ui/touchpad.h: the one true layout -- tp_layout's own TpVisual */
 
 /* the game's own (window.c / overlay.cpp) */
-extern int  touchpad_on(void);
-extern void touchpad_set_on(int on);
+extern int  touchpad_on(void); extern void touchpad_set_on(int on);   /* (touchpad.h has the layout structs; these two here read as actions) */
 extern void overlay_toast_titled(const char *title, const char *body, double seconds);
 extern void overlay_bar_open(void);
 extern int  overlay_is_open(void);
@@ -33,6 +32,20 @@ extern int  overlay_pad_hidden(void);   /* overlay.cpp: the bar/menus/a dialog o
 extern void touchpad_native_press(int which);    /* window.c: the same state a finger on the glass would set */
 extern void touchpad_native_release(int which);
 void ios_ui_haptic(int kind);                    /* this file's own: 0 light, 1 medium, 2 soft */
+/* the bar's handles (window.c / overlay.cpp / settings): every row's action the same one the ImGui row took */
+extern int  touchpad_scale(void); extern void touchpad_set_scale(int percent);
+extern int  touchpad_mirror(void); extern void touchpad_set_mirror(int on);   /* touchpad.h has these too; the externs keep the list in one place */
+extern int  window_touchpad_rstick(void);
+extern int  settings_int(const char *key, int dflt);
+extern void settings_set_int(const char *key, int value);
+extern void settings_save(void);
+extern int  gfx_gpu_render_scale_max(void); extern int gfx_gpu_render_scale_wanted(void); extern void gfx_gpu_render_scale_request(int n);
+extern int  overlay_game_paused(void); extern void overlay_set_paused(int on); extern void overlay_open(void);
+extern float overlay_volume(void); extern void overlay_set_volume(float v);
+extern int  overlay_frame_rate_wanted(void); extern void overlay_frame_rate_request(int fr); extern int overlay_frame_rate_offered(void);
+extern void overlay_request_quit(void);
+extern int  overlay_stats_level(void); extern void overlay_set_stats(int level);
+extern void overlay_show_controls_page(void);
 
 static UIWindow      *g_win;
 static UIView        *g_host;        /* where the chrome lives: the root view controller's view (the same view SDL's Metal content lives in; added after, composited and hit-tested above) */
@@ -77,6 +90,7 @@ static void eye_look(void) {
 }
 
 /* ---- the pad: UIKit's own buttons, and the picture drawn ---------------------------------- */
+static int bar_visible(void);   /* the native strip's own state, asked by the pad's gates below */
 /* Two halves, one layout (tp_layout's TpVisual, the same numbers window.c hit-tests with):
  *
  * PadBtn -- the invisible touch area of one control. It draws nothing (the layer below holds the
@@ -103,6 +117,7 @@ static void eye_look(void) {
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)ev {
 	(void)ev;
 	if (!touchpad_on() || overlay_is_open()) return NO;
+	if (bar_visible()) return NO;   /* the strip is down: its panel owns the screen, the shield takes the rest */
 	if (overlay_pad_hidden()) return NO;   /* the bar's down, a menu, a dialog (Step 34's bits): whatever made the picture stand down stands its touches down -- the tabs sit on the pills' zone, and a menu must be pressable */
 	{	/* wherever ImGui owns the point, the finger is its (a menu over the shoulders, a dialog):
 		 * fall through as though this control were not here -- the exact behaviour the tap used to have.
@@ -280,7 +295,7 @@ struct PadSig {
 	}
 	struct PadSig s;
 	memset(&s, 0, sizeof s);
-	s.nb = tv->nb; s.opacity = tv->opacity; s.hidden = overlay_pad_hidden();
+	s.nb = tv->nb; s.opacity = tv->opacity; s.hidden = overlay_pad_hidden() != 0 || bar_visible() != 0;
 	s.w = self.bounds.size.width; s.h = self.bounds.size.height;
 	for (int i = 0; i < tv->nb && i < 8; i++) s.down[i] = tv->b[i].down;
 	s.sl_a = tv->sl_active; s.sl_x = tv->sl_x; s.sl_y = tv->sl_y; s.sl_kx = tv->sl_kx; s.sl_ky = tv->sl_ky; s.sl_r = tv->sl_r;
@@ -327,6 +342,343 @@ void ios_ui_haptic(int kind) {
 	}
 	[g_hap[kind] impactOccurred];
 }
+/* The whole daily surface of the ImGui overlay -- pull-down bar and its three menus -- built as UIKit's
+ * own: a strip with three tabs, each opening a panel of rows below it, every row driving the exact
+ * function the ImGui row drove (overlay.cpp's native handles, no new state invented). While the chrome
+ * is up: taps in the top strip's middle band (and only there -- "so L and R don't misstrigger it")
+ * slide the strip down; a tab holds its panel; a tap anywhere else closes both; the pad and its touches
+ * stand down while the strip is up, exactly as the ImGui bar's bit did. The ImGui bar and its pull tab
+ * build never (overlay.cpp gates them on ios_ui_chrome_active); RECOMP_NATIVE_CHROME=0 restores all of it. */
+static UIView *g_bar;                /* the strip itself */
+static UIButton *g_bar_tab[3];      /* Game / Display / Controls */
+static UIView *g_shield;             /* tap-anywhere-to-close: one tap, the game never sees it */
+static UIView *g_panel;              /* the open panel (its rows rebuilt per state change) */
+static int g_panel_tab = -1;         /* which panel is open (-1: none) */
+static NSMutableArray *g_panel_keep;   /* the panel's action holders, swept on each rebuild */
+static int g_bar_shown;              /* the strip is down (its own slide state) */
+static double g_bar_last;            /* the last moment the strip was touched */
+
+@interface BN : NSObject { @public void (^b)(void); }
++ (id)act:(void (^)(void))blk;
+- (void)fire;
+@end
+@implementation BN
+- (void)dealloc { [b release]; [super dealloc]; }
++ (id)act:(void (^)(void))blk { BN *n = [[BN alloc] init]; n->b = [blk copy]; [g_panel_keep addObject:n]; return [n autorelease]; }
+- (void)fire { self->b(); }
+@end
+
+/* the strip's colours and type, one place */
+static UIColor *bar_bg(void) { return rgba(26, 28, 34, 0.97f); }
+static UIFont *bar_row_font(void) { return [UIFont systemFontOfSize:14.5f]; }
+
+/* a panel row's primitives -- manual frames, manual memory, nothing clever */
+static UILabel *panel_head(CGRect f, NSString *s) {
+	UILabel *l = [[UILabel alloc] initWithFrame:f];
+	l.text = s; l.font = [UIFont systemFontOfSize:11.5f weight:UIFontWeightMedium];
+	l.textColor = rgba(150, 156, 172, 1.0f);
+	[g_panel addSubview:l]; [l release];
+	return l;
+}
+static UIView *panel_line(CGRect f) {
+	UIView *v = [[UIView alloc] initWithFrame:f];
+	v.backgroundColor = rgba(255, 255, 255, 0.08f);
+	[g_panel addSubview:v]; [v release];
+	return v;
+}
+static UIView *panel_dot(CGRect f) {   /* the amber radio dot */
+	UIView *v = [[UIView alloc] initWithFrame:f];
+	v.layer.cornerRadius = CGRectGetHeight(f) * 0.5f;
+	v.backgroundColor = rgba(240, 192, 96, 1.0f);
+	[g_panel addSubview:v]; [v release];
+	return v;
+}
+static UIButton *panel_button(CGRect f, NSString *title) {
+	UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+	b.frame = f;
+	b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+	b.contentEdgeInsets = UIEdgeInsetsMake(0, 14, 0, 14);
+	b.titleLabel.font = bar_row_font();
+	[b setTitleColor:rgba(234, 236, 244, 0.94f) forState:UIControlStateNormal];
+	[b setTitle:title forState:UIControlStateNormal];
+	b.layer.backgroundColor = rgba(255, 255, 255, 0.0f).CGColor;   /* the highlight paints on it */
+	[b setTitleColor:[UIColor whiteColor] forState:UIControlStateHighlighted | UIControlStateSelected];
+	b.layer.cornerRadius = 6.0f;
+	[b setBackgroundColor:rgba(255, 255, 255, 0.0f) forState:UIControlStateNormal];
+	[b setBackgroundColor:rgba(255, 255, 255, 0.10f) forState:UIControlStateHighlighted];
+	[g_panel addSubview:b];
+	return b;
+}
+static void panel_fire_on_highlight(UIButton *b, void (^blk)(void)) {   /* the row's press: the block retires with g_panel_keep */
+	BN *n = [BN act:blk];
+	[b addTarget:n action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+}
+
+/* the panel's three contents -- the phone's own rows, the same actions the ImGui menus took */
+static void bar_panel_rebuild(void);
+static void bar_up_close_all(void);
+static void bar_make(void);
+static CGFloat panel_rows(int tab) {
+	CGFloat y = 6;
+	const CGFloat row = 34.0f, inset = 14.0f;
+	const CGRect vb = g_panel.bounds;
+	UIButton *b;
+	if (tab == 0) {   /* Game */
+		b = panel_button(CGRectMake(0, y, vb.size.width, row), overlay_game_paused() ? @"Resume" : @"Pause");
+		panel_fire_on_highlight(b, ^{ overlay_set_paused(overlay_game_paused() ? 0 : 1); bar_panel_rebuild(); });
+		y += row;
+		b = panel_button(CGRectMake(0, y, vb.size.width, row), @"All settings…");
+		panel_fire_on_highlight(b, ^{ bar_up_close_all(); overlay_open(); });
+		y += row;
+		{	/* Volume: the label, the slider, the live value */
+			UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(inset, y + 7, 64, 19)];
+			l.text = @"Volume"; l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
+			[g_panel addSubview:l]; [l release];
+			UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 56, y + 7, 44, 19)];
+			vl.font = bar_row_font(); vl.textColor = rgba(150, 156, 172, 1.0f); vl.text = [NSString stringWithFormat:@"%.0f%%", overlay_volume() * 100.0f];
+			[g_panel addSubview:vl]; [vl release];
+			UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(inset + 70, y + 3, vb.size.width - inset - 74 - 56, 28)];
+			sl.minimumValue = 0.0f; sl.maximumValue = 1.0f; sl.value = overlay_volume();
+			sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
+			[g_panel addSubview:sl];
+			/* no ARC: __block keeps the slider's blocks from retaining the slider that targets them */
+	__block UISlider *wsl = sl; __block UILabel *wvl = vl;
+	[sl addTarget:[BN act:^{ overlay_set_volume(wsl.value); wvl.text = [NSString stringWithFormat:@"%.0f%%", wsl.value * 100.0f]; }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+			[sl release];
+		}
+		y += row + 4;
+		if (overlay_frame_rate_offered()) {
+			y += 4;
+			UILabel *h = panel_head(CGRectMake(inset, y, vb.size.width - 2 * inset, 16), @"Frame rate"); (void)h;
+			y += 18;
+			const int fr = overlay_frame_rate_wanted();
+			b = panel_button(CGRectMake(0, y, vb.size.width, row), @"30");
+			if (fr < 60) panel_dot(CGRectMake(vb.size.width - 20, y + row * 0.5f - 3, 6, 6));
+			panel_fire_on_highlight(b, ^{ overlay_frame_rate_request(30); bar_panel_rebuild(); });
+			y += row;
+			b = panel_button(CGRectMake(0, y, vb.size.width, row), @"60 (experimental)");
+			if (fr >= 60) panel_dot(CGRectMake(vb.size.width - 20, y + row * 0.5f - 3, 6, 6));
+			panel_fire_on_highlight(b, ^{ overlay_frame_rate_request(60); bar_panel_rebuild(); });
+			y += row;
+		}
+		panel_line(CGRectMake(0, y + 2, vb.size.width, 1)); y += 10;
+		b = panel_button(CGRectMake(0, y, vb.size.width, row), @"Quit game");
+		panel_fire_on_highlight(b, ^{ overlay_request_quit(); });
+		y += row;
+	}
+	if (tab == 1) {   /* Display */
+		{
+			UILabel *h = panel_head(CGRectMake(inset, y, vb.size.width - 2 * inset, 16), @"On-screen stats"); (void)h;
+			y += 18;
+			static const char *const names[3] = { "Off", "FPS", "Full" };
+			const int lvl = overlay_stats_level();
+			for (int i = 0; i < 3; i++) {
+				UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), [NSString stringWithUTF8String:names[i]]);
+				if (lvl == i) panel_dot(CGRectMake(vb.size.width - 20, y + row * 0.5f - 3, 6, 6));
+				const int pick = i;
+				panel_fire_on_highlight(r, ^{ overlay_set_stats(pick); bar_panel_rebuild(); });
+				y += row;
+			}
+		}
+		y += 4; panel_line(CGRectMake(0, y, vb.size.width, 1)); y += 8;
+		{
+			UILabel *h = panel_head(CGRectMake(inset, y, vb.size.width - 2 * inset, 16), @"Resolution"); (void)h;
+			y += 18;
+			int mx = gfx_gpu_render_scale_max(); if (mx > 3) mx = 3;
+			const int rs = gfx_gpu_render_scale_wanted();
+			for (int n = 1; n <= mx; n++) {
+				NSString *l = [NSString stringWithFormat:@"%dx   %d x %d", n, 960 * n, 544 * n];
+				UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), l);
+				if (rs == n) panel_dot(CGRectMake(vb.size.width - 20, y + row * 0.5f - 3, 6, 6));
+				const int pick = n;
+				panel_fire_on_highlight(r, ^{ gfx_gpu_render_scale_request(pick); bar_panel_rebuild(); });
+				y += row;
+			}
+		}
+	}
+	if (tab == 2) {   /* Controls */
+		{	int on = touchpad_on();
+			UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), @"On-screen controls");
+			UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 58, y + 8, 44, 18)];
+			st.font = bar_row_font(); st.textColor = on ? rgba(240, 192, 96, 1.0f) : rgba(150, 156, 172, 1.0f);
+			st.text = on ? @"On" : @"Off";
+			[g_panel addSubview:st]; [st release];
+			panel_fire_on_highlight(r, ^{ touchpad_set_on(touchpad_on() ? 0 : 1); bar_panel_rebuild(); });
+			y += row;
+		}
+		{	int on = window_touchpad_rstick() != 0;
+			UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), @"Second stick (the lower right corner)");
+			UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 58, y + 8, 44, 18)];
+			st.font = bar_row_font(); st.textColor = on ? rgba(240, 192, 96, 1.0f) : rgba(150, 156, 172, 1.0f);
+			st.text = on ? @"On" : @"Off";
+			[g_panel addSubview:st]; [st release];
+			panel_fire_on_highlight(r, ^{ settings_set_int("touchpad_rstick", window_touchpad_rstick() ? 0 : 1); settings_save(); bar_panel_rebuild(); });
+			y += row;
+		}
+		{	/* Control size: 60..160 */
+			UILabel *l = panel_head(CGRectMake(inset, y + 8, vb.size.width - 2 * inset - 56, 18), @"Control size");
+			(void)l; l.text = @"Control size"; l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
+			UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 56, y + 8, 44, 18)];
+			vl.font = bar_row_font(); vl.textColor = rgba(150, 156, 172, 1.0f);
+			int v = touchpad_scale();
+			vl.text = [NSString stringWithFormat:@"%d%%", v];
+			[g_panel addSubview:vl]; [vl release];
+			UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(inset, y + 26, vb.size.width - 2 * inset, 24)];
+			sl.minimumValue = 60; sl.maximumValue = 160; sl.value = v;
+			sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
+			[g_panel addSubview:sl];
+			__block UISlider *wsl = sl; __block UILabel *wvl = vl;   /* no ARC: keeps the blocks from retaining the slider */
+			[sl addTarget:[BN act:^{ int nv = (int)(wsl.value + 0.5f); wvl.text = [NSString stringWithFormat:@"%d%%", nv]; }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+			[sl addTarget:[BN act:^{ touchpad_set_scale((int)(wsl.value + 0.5f)); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+			[sl release];
+			y += row + 16;
+		}
+		{	/* Opacity: 10..90 */
+			UILabel *l = panel_head(CGRectMake(inset, y + 8, vb.size.width - 2 * inset - 56, 18), @"See-through controls");
+			l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
+			UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 56, y + 8, 44, 18)];
+			vl.font = bar_row_font(); vl.textColor = rgba(150, 156, 172, 1.0f);
+			int v = settings_int("touchpad_opacity", 42);
+			vl.text = [NSString stringWithFormat:@"%d%%", v];
+			[g_panel addSubview:vl]; [vl release];
+			UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(inset, y + 26, vb.size.width - 2 * inset, 24)];
+			sl.minimumValue = 10; sl.maximumValue = 90; sl.value = v;
+			sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
+			[g_panel addSubview:sl];
+			__block UISlider *wsl = sl; __block UILabel *wvl = vl;   /* no ARC: keeps the blocks from retaining the slider */
+			[sl addTarget:[BN act:^{ int nv = (int)(wsl.value + 0.5f); wvl.text = [NSString stringWithFormat:@"%d%%", nv]; }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+			[sl addTarget:[BN act:^{ settings_set_int("touchpad_opacity", (int)(wsl.value + 0.5f)); settings_save(); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+			[sl release];
+			y += row + 16;
+		}
+		{	bool lh = touchpad_mirror() != 0;
+			UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), @"Left-handed (swap sides)");
+			UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 58, y + 8, 44, 18)];
+			st.font = bar_row_font(); st.textColor = lh ? rgba(240, 192, 96, 1.0f) : rgba(150, 156, 172, 1.0f);
+			st.text = lh ? @"On" : @"Off";
+			[g_panel addSubview:st]; [st release];
+			panel_fire_on_highlight(r, ^{ touchpad_set_mirror(touchpad_mirror() ? 0 : 1); bar_panel_rebuild(); });
+			y += row;
+		}
+		panel_line(CGRectMake(0, y + 2, vb.size.width, 1)); y += 10;
+		b = panel_button(CGRectMake(0, y, vb.size.width, row), @"Controls reference…");
+		panel_fire_on_highlight(b, ^{ bar_up_close_all(); overlay_show_controls_page(); });
+		y += row;
+	}
+	return y + 8;
+}
+
+static void bar_panel_rebuild(void) {
+	if (g_panel_tab < 0) return;
+	[g_panel_keep removeAllObjects];   /* the BN blocks retire with their rows */
+	for (UIView *v in [g_panel subviews]) [v removeFromSuperview];
+	const int tab = g_panel_tab;
+	const CGFloat widths[3] = { 250.0f, 250.0f, 300.0f };
+	CGFloat w = widths[tab];
+	g_panel.bounds = CGRectMake(0, 0, w, 100);
+	const CGFloat h = panel_rows(tab);
+	[g_panel setFrame:CGRectMake(g_panel.frame.origin.x, g_panel.frame.origin.y, w, h)];
+}
+
+static void bar_panel_open(int tab) {
+	g_panel_tab = tab;
+	g_bar_last = chrome_now();
+	UIButton *t = g_bar_tab[tab];
+	CGFloat x = t.frame.origin.x - 4; if (x < 4) x = 4;
+	const CGFloat widths[3] = { 250.0f, 250.0f, 300.0f };
+	if (x + widths[tab] > g_bar.bounds.size.width - 4) x = g_bar.bounds.size.width - widths[tab] - 4;
+	[g_panel setFrame:CGRectMake(x, g_bar.bounds.size.height + 1, widths[tab], 10)];
+	bar_panel_rebuild();
+	g_shield.hidden = NO;
+	g_panel.hidden = NO;
+	ios_ui_haptic(0);   /* the panel's little tick */
+}
+static void bar_panel_close(void) {
+	g_panel_tab = -1;
+	g_panel.hidden = YES;
+	g_shield.hidden = YES;
+}
+static void bar_up_close_all(void) {
+	if (!g_bar) return;
+	bar_panel_close();
+	g_bar_shown = 0;
+	[UIView animateWithDuration:0.20 animations:^{ CGRect f = g_bar.frame; f.origin.y = -f.size.height; g_bar.frame = f; }];
+}
+void ios_ui_bar_open(void) {
+	if (!g_installed) return;
+	if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_bar_open(); }); return; }
+	if (!g_bar) bar_make();   /* built the first time it's ever pulled */
+	if (!g_bar) return;
+	g_bar_last = chrome_now();
+	if (!g_bar_shown) {
+		g_bar_shown = 1;
+		[UIView animateWithDuration:0.22 animations:^{ CGRect f = g_bar.frame; f.origin.y = 0; g_bar.frame = f; }];
+		ios_ui_haptic(0);
+	}
+}
+static void bar_tab_tapped(int tab) {
+	if (overlay_is_open()) { bar_up_close_all(); return; }   /* the full menu is up: the strip steps out of its way */
+	g_bar_last = chrome_now();
+	if (g_panel_tab == tab) { bar_panel_close(); return; }
+	bar_panel_open(tab);
+}
+static void bar_make(void) {
+	const CGFloat bh = 34.0f;
+	g_panel_keep = [[NSMutableArray alloc] init];   /* the tab buttons use it before anything else exists */
+	/* the strip: full width, 34 tall, parked above the top until opened */
+	g_bar = [[UIView alloc] initWithFrame:CGRectMake(0, -bh, g_host.bounds.size.width, bh)];
+	g_bar.backgroundColor = bar_bg();
+	g_bar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleBottomMargin;
+	[g_host addSubview:g_bar];
+	[g_bar release];
+	/* its bottom hairline, the card's one edge */
+	{	UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, bh - 1, g_bar.bounds.size.width, 1)];
+		line.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+		line.backgroundColor = rgba(255, 255, 255, 0.10f);
+		[g_bar addSubview:line];
+		[line release];
+	}
+
+	/* the tab buttons: Game / Display / Controls, off the eye's corner (Step 25's slot) */
+	const CGFloat ty = 3;
+	static const char *const tabs[3] = { "Game", "Display", "Controls" };
+	CGFloat tx = 82;   /* the eye's own slot ends at ~70 */
+	for (int i = 0; i < 3; i++) {
+		UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+		b.frame = CGRectMake(tx, ty, 0, 0);   /* sized below, once the titles are set */
+		[b setTitle:[NSString stringWithUTF8String:tabs[i]] forState:UIControlStateNormal];
+		b.titleLabel.font = [UIFont systemFontOfSize:14.5f weight:UIFontWeightMedium];
+		[b setTitleColor:rgba(226, 230, 240, 0.75f) forState:UIControlStateNormal];
+		[b setTitleColor:[UIColor whiteColor] forState:UIControlStateHighlighted | UIControlStateSelected];
+		[b sizeToFit];
+		CGRect f = b.frame; f.size.width += 22; f.size.height = bh - 6; f.origin.y = ty;
+		b.frame = f;
+		const int ti = i;
+		[b addTarget:[BN act:^{ bar_tab_tapped(ti); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+		[g_bar addSubview:b];
+		g_bar_tab[i] = b;
+		tx += f.size.width + 8;
+	}
+	/* the shield: a tap anywhere closes the panel (the game never sees that one tap -- the ImGui menus behaved the same) */
+	g_shield = [[UIView alloc] initWithFrame:g_host.bounds];
+	g_shield.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	g_shield.backgroundColor = [UIColor clearColor];
+	g_shield.hidden = YES;
+	[g_shield addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:[BN act:^{ bar_up_close_all(); }] action:@selector(fire)]];
+	[g_host addSubview:g_shield];
+	[g_shield release];
+	/* the panel: the rounded card under the open tab */
+	g_panel = [[UIView alloc] initWithFrame:CGRectZero];
+	g_panel.backgroundColor = bar_bg();
+	g_panel.layer.cornerRadius = 10.0f;
+	g_panel.layer.borderColor = rgba(255, 255, 255, 0.10f).CGColor;
+	g_panel.layer.borderWidth = 0.5f;
+	g_panel.hidden = YES;
+	g_panel.userInteractionEnabled = YES;
+	[g_host addSubview:g_panel];
+	[g_panel release];
+}
+static int bar_visible(void) { return g_bar && g_bar.frame.origin.y > -20.0f ? 1 : 0; }
 
 /* window.c's tp_layout hands its own numbers here (the same TpVisual both pictures read): each
  * button's touch area set to its control's shape -- a pill's box, or a 1.18-radius circle -- and
@@ -383,13 +735,19 @@ void ios_ui_pad_layout(void) {
 	[super touchesBegan:touches withEvent:event];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	{
+		/* only the strip's own middle band pulls (overlay.cpp's own gate, mirrored here): the
+		 * shoulders L and R live at the top corners and must never misstrigger the menu */
+		const CGFloat w = self.view ? self.view.bounds.size.width : 0;
+		if (self.startX < w * 0.5f - 140.0f || self.startX > w * 0.5f + 140.0f) self.fired = 1;
+	}
 	if (!self.fired && self.startY <= 16.0f && !(g_eye && self.startY <= CGRectGetMaxY(g_eye.frame) && self.startX <= CGRectGetMaxX(g_eye.frame))) {
 		UITouch *t = touches.anyObject;
 		if (t && self.view) {
 			const CGPoint p = [t locationInView:self.view];
 			if (p.y - self.startY > 12.0f) {
 				self.fired = 1;
-				overlay_bar_open();
+				ios_ui_bar_open();
 				ios_ui_haptic(0);
 				chrome_log("    chrome: pull fired, start (%.0f, %.0f)", self.startX, self.startY);
 			}
@@ -421,13 +779,17 @@ static ChromeCenter *g_center;
 	if (g_eye) eye_look();   /* the menu's toggle reaches the eye */
 	{
 		/* the bar, its menus, a dialog: whatever ImGui holds over the picture gets the pixels, and
-		 * the pad's controls (their drawing: the layer; their taps: the buttons under it) stand down */
-		const int hide = overlay_pad_hidden() != 0;   /* (bitmask of its reasons: the once-a-second line tells) */
+		 * the pad's controls (their drawing: the layer; their taps: the buttons under it) stand down;
+		 * the native strip says the same with bar_visible() */
+		const int hide = overlay_pad_hidden() != 0 || bar_visible() != 0;   /* (bitmask of its reasons: the once-a-second line tells) */
 		if (hide != g_pad_hidden) {
 			g_pad_hidden = hide;
 			g_eye.hidden = hide;
 			if (g_pad_layer) { g_pad_layer.hidden = hide || !on; [g_pad_layer setNeedsDisplay]; }
 		}
+	}
+	{	/* the strip alone slides back up when nobody has touched it for a moment (an open panel holds it) */
+		if (g_bar && g_bar_shown && g_panel_tab < 0 && chrome_now() - g_bar_last > 2.5 && !overlay_is_open()) bar_up_close_all();
 	}
 	{
 		/* once a second, the chrome's whole state in one line: the hidden bits (why the pad stood

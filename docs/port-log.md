@@ -487,3 +487,31 @@ Three from the phone's report, all clean:
   The old rationale -- the game's icon bar lives where the pocket
   is -- mattered less once taps through pockets became true taps;
   the phone asked for both, and both it has.
+
+### Step 38 — the bar itself, native (UIKit)
+
+- The whole pull-down surface is the phone's own now: a 34-point
+  strip (Game / Display / Controls tabs) that slides down from the
+  top and back up, built the first time it's ever pulled. Each tab
+  opens a rounded panel of UIKit rows driving the exact handles
+  the ImGui menus drove (overlay.cpp's extern "C" set -- no new
+  state was invented):
+  - Game: Resume/Pause, All settings..., Volume (live slider),
+    Frame rate 30/60 when the game offers it, Quit game.
+  - Display: On-screen stats (Off/FPS/Full), Resolution 1x..3x.
+  - Controls: the controls toggle, the second stick, Control size
+    (60-160), See-through (10-90), Left-handed, Controls
+    reference... (the full menu, which stays ImGui for now).
+- The strip pulls only from its middle band (overlay.cpp's own
+  gate, mirrored in the recognizer: |x - w/2| <= 140) -- L and R
+  at the top corners never misstrigger it.
+- While the strip is down the pad stands down entirely (pixels,
+  touches, haptics), as the ImGui bar's bit always made it; a tap
+  anywhere outside the panel (a shield view) closes both; the
+  strip alone slides back up after 2.5 s idle.
+- The ImGui bar and its pull tab never build while the native
+  chrome is installed; RECOMP_NATIVE_CHROME=0 restores all of it.
+- Manual memory kept honest: the panel's actions live in BN
+  holders swept on each rebuild, and the sliders' blocks use
+  __block pointers so they never retain the slider that targets
+  them (no ARC here; what leaks at all, leaks nothing).
