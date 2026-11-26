@@ -590,3 +590,20 @@ Three from the phone's report, all clean:
   runs: the pill's and the eye's frames, hidden flags and
   in-window bits -- if the pill still refuses to paint, the next
   session's log says exactly which piece of that is true.
+
+### Step 43 — actually native (the look, not just the plumbing)
+
+- The settings center is a real iOS settings screen now: a
+  UINavigationBar with the system Done button (amber tint), a real
+  UISegmentedControl for the five pages, and a UITableView in the
+  inset-grouped style (the Settings app's own) -- system cells,
+  separators, selection highlight, semantic colors (label /
+  secondaryLabel / grouped backgrounds). Rows are CfgRow models
+  built per page; every row's block is still the same call the
+  ImGui page made. Switches, sliders and segmented controls are
+  the system's own, tinted amber.
+- The chrome's cards wear the frosted material (UIVisualEffectView,
+  SystemMaterialDark): the settings card, the menu strip, its
+  panels, the pause card, the intro strip.
+- The strip panels' radio dots became the system's own checkmark
+  mark (drawn by hand -- SF Symbols never rendered here).

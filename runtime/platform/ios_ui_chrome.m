@@ -93,6 +93,7 @@ static void chrome_log(const char *fmt, ...) {
 }
 static double chrome_now(void) { return (double)(int64_t)(CFAbsoluteTimeGetCurrent() + 978307200.0); }   /* the game's own clock: unix seconds */
 static UIColor *rgba(int r, int g, int b, float a);   /* defined below the pad section: the glyphs ask for it first */
+static UIVisualEffectView *blur_fill(UIView *host, UIBlurEffectStyle st);   /* the frosted material (the settings center defines it) */
 
 /* ---- the eye ---------------------------------------------------------------------------- */
 /* the chrome's glyphs, drawn by hand: SF Symbols never showed here (the eye rendered as a bare dark
@@ -125,6 +126,12 @@ static UIImage *glyph(NSString *kind, CGFloat w, CGFloat h, UIColor *stroke) {
 			[p moveToPoint:CGPointMake(w * 0.26f, h * 0.40f)];
 			[p addLineToPoint:CGPointMake(w * 0.5f, h * 0.66f)];
 			[p addLineToPoint:CGPointMake(w * 0.74f, h * 0.40f)];
+			[p stroke];
+		} else if ([kind isEqualToString:@"check"]) {   /* the system's own mark, drawn (SF Symbols never rendered here) */
+			UIBezierPath *p = [UIBezierPath bezierPath];
+			[p moveToPoint:CGPointMake(w * 0.18f, h * 0.54f)];
+			[p addLineToPoint:CGPointMake(w * 0.42f, h * 0.80f)];
+			[p addLineToPoint:CGPointMake(w * 0.84f, h * 0.20f)];
 			[p stroke];
 		}
 	}];
@@ -423,7 +430,6 @@ static NSMutableArray *g_keep;       /* the array BN drops its holders into (the
 @end
 
 /* the strip's colours and type, one place */
-static UIColor *bar_bg(void) { return rgba(26, 28, 34, 0.97f); }
 static UIFont *bar_row_font(void) { return [UIFont systemFontOfSize:14.5f]; }
 
 /* a panel row's primitives -- manual frames, manual memory, nothing clever */
@@ -440,10 +446,9 @@ static UIView *panel_line(CGRect f) {
 	[g_rows addSubview:v]; [v release];
 	return v;
 }
-static UIView *panel_dot(CGRect f) {   /* the amber radio dot */
-	UIView *v = [[UIView alloc] initWithFrame:f];
-	v.layer.cornerRadius = CGRectGetHeight(f) * 0.5f;
-	v.backgroundColor = rgba(240, 192, 96, 1.0f);
+static UIView *panel_dot(CGRect f) {   /* the row's mark: the system's own check, drawn (SF Symbols never rendered here) */
+	UIImageView *v = [[UIImageView alloc] initWithFrame:CGRectMake(f.origin.x - 6.0f, f.origin.y - 4.0f, 14.0f, 14.0f)];
+	v.image = glyph(@"check", 14.0f, 14.0f, rgba(240, 192, 96, 1.0f));
 	[g_rows addSubview:v]; [v release];
 	return v;
 }
@@ -637,8 +642,8 @@ static CGFloat panel_rows(int tab) {
 
 static void bar_panel_rebuild(void) {
 	if (g_panel_tab < 0) return;
-	[g_panel_keep removeAllObjects];   /* the BN blocks retire with their rows */
-	for (UIView *v in [g_panel subviews]) [v removeFromSuperview];
+	[g_panel_keep removeAllObjects];   /* the BN blocks retire with their rows; the panel's blur stays (Step 43) */
+	for (UIView *v in [g_panel subviews]) if (![v isKindOfClass:[UIVisualEffectView class]]) [v removeFromSuperview];
 	const int tab = g_panel_tab;
 	const CGFloat widths[3] = { 250.0f, 250.0f, 300.0f };
 	const CGFloat w = widths[tab];
@@ -695,9 +700,10 @@ static void bar_make(void) {
 	const CGFloat bh = 34.0f;
 	g_panel_keep = [[NSMutableArray alloc] init];   /* the tab buttons use it before anything else exists */
 	g_keep = g_panel_keep;
-	/* the strip: full width, 34 tall, parked above the top until opened */
+	/* the strip: full width, 34 tall, parked above the top until opened; the frosted material (Step 43) */
 	g_bar = [[UIView alloc] initWithFrame:CGRectMake(0, -bh, g_host.bounds.size.width, bh)];
-	g_bar.backgroundColor = bar_bg();
+	g_bar.backgroundColor = [UIColor clearColor];
+	blur_fill(g_bar, UIBlurEffectStyleSystemMaterialDark);
 	g_bar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleBottomMargin;
 	[g_host addSubview:g_bar];
 	[g_bar release];
@@ -737,10 +743,12 @@ static void bar_make(void) {
 	[g_shield addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:[BN act:^{ bar_up_close_all(); }] action:@selector(fire)]];
 	[g_host addSubview:g_shield];
 	[g_shield release];
-	/* the panel: the rounded card under the open tab */
+	/* the panel: the rounded card under the open tab, the same frosted material */
 	g_panel = [[UIView alloc] initWithFrame:CGRectZero];
-	g_panel.backgroundColor = bar_bg();
+	g_panel.backgroundColor = [UIColor clearColor];
+	blur_fill(g_panel, UIBlurEffectStyleSystemMaterialDark);
 	g_panel.layer.cornerRadius = 10.0f;
+	g_panel.layer.masksToBounds = YES;
 	g_panel.layer.borderColor = rgba(255, 255, 255, 0.10f).CGColor;
 	g_panel.layer.borderWidth = 0.5f;
 	g_panel.hidden = YES;
@@ -796,8 +804,10 @@ static void pause_tick(void) {
 	if (!show) { if (g_pz_card) g_pz_card.hidden = YES; return; }
 	if (!g_pz_card) {
 		g_pz_card = [[UIView alloc] initWithFrame:CGRectZero];
-		g_pz_card.backgroundColor = rgba(0, 0, 0, 0.72f);
-		g_pz_card.layer.cornerRadius = 10.0f;
+		g_pz_card.backgroundColor = [UIColor clearColor];
+		blur_fill(g_pz_card, UIBlurEffectStyleSystemMaterialDark);
+		g_pz_card.layer.cornerRadius = 14.0f;
+		g_pz_card.layer.masksToBounds = YES;
 		g_pz_card.userInteractionEnabled = NO;
 		g_pz_t = [[UILabel alloc] initWithFrame:CGRectZero];
 		g_pz_t.text = @"PAUSED"; g_pz_t.font = [UIFont systemFontOfSize:24.0f weight:UIFontWeightBold];
@@ -842,8 +852,10 @@ static void intro_tick(void) {
 	if (touched && now - g_intro_tap > 1.2) { overlay_intro_dismiss(); return; }   /* a moment, then the game */
 	if (!g_intro_view && !touched) {
 		g_intro_view = [[UIView alloc] initWithFrame:CGRectZero];
-		g_intro_view.backgroundColor = rgba(22, 25, 30, 0.92f);
-		g_intro_view.layer.cornerRadius = 10.0f;
+		g_intro_view.backgroundColor = [UIColor clearColor];
+		blur_fill(g_intro_view, UIBlurEffectStyleSystemMaterialDark);
+		g_intro_view.layer.cornerRadius = 12.0f;
+		g_intro_view.layer.masksToBounds = YES;
 		g_intro_view.userInteractionEnabled = NO;   /* the game's own touches, as the strip always let them */
 		UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
 		t.text = @"Playing on this phone"; t.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightSemibold];
@@ -861,7 +873,7 @@ static void intro_tick(void) {
 		[g_intro_view addSubview:a]; [a release];
 		[g_host addSubview:g_intro_view];
 		[g_intro_view release];
-		UILabel *tl = [g_intro_view.subviews objectAtIndex:0], *bl = [g_intro_view.subviews objectAtIndex:1], *al = [g_intro_view.subviews objectAtIndex:2];
+		UILabel *tl = [g_intro_view.subviews objectAtIndex:1], *bl = [g_intro_view.subviews objectAtIndex:2], *al = [g_intro_view.subviews objectAtIndex:3];   /* (0: the blur) */
 		const CGSize sz = g_host.bounds.size;
 		const CGFloat cw = fminf(sz.width * 0.52f, 430.0f), in = 14.0f;
 		const CGSize bs = [bl sizeThatFits:CGSizeMake(cw - 2 * in, 2000.0f)];
@@ -876,17 +888,429 @@ static void intro_tick(void) {
 	if (g_intro_view) g_intro_view.hidden = touched != 0;   /* the first touch: it simply goes */
 }
 
-/* the settings center: the full menu's five pages as UIKit rows (a dim, a card, a tab row,
- * a scroll of rows); ''s rows drive the same handles the ImGui pages did */
+/* the settings center: the full menu as iOS's own settings look (Step 43) -- a real navigation bar
+ * with Done, a real segmented control for the five pages, and a real UITableView (inset-grouped, the
+ * Settings app's own style) fed by CfgRow models; every row drives the same handle the ImGui page
+ * drove, no new state. The card is a blur material, the amber is the tint, the controls are the
+ * system's own switch / slider / segmented -- nothing hand-drawn except the glyphs the system can't
+ * give us here. */
 static UIView *g_cfg_dim;         /* the dim over the game: a tap is Done */
-static UIView *g_cfg_card;        /* the card itself (a sibling: taps on it are nobody else's) */
-static UIScrollView *g_cfg_scr;   /* the pages' rows */
-static UIButton *g_cfg_tab[5];
+static UIView *g_cfg_card;        /* the card: a blur material, rounded, masked */
+static UINavigationBar *g_cfg_nav;
+static UISegmentedControl *g_cfg_segs;
+static UITableView *g_cfg_tbl;
+static NSMutableArray *g_cfg_rows;   /* the open page's CfgRow models */
 static NSMutableArray *g_cfg_keep;
-static int g_cfg_page = -1;       /* the open page (-1: closed) */
-static UILabel *g_cfg_fps;       /* the Performance page's live number */
-static CGFloat cfg_y;            /* the row cursor while a page builds */
+static int g_cfg_page = -1;         /* the open page (-1: closed) */
+static UILabel *g_cfg_fps;          /* the Performance page's live number (its cell's own label) */
 static const char *const cfg_tab_names[5] = { "Display", "Performance", "Game", "Controls", "Help" };
+
+/* the frosted material every native card wears, one helper (the host keeps it, it never takes a touch) */
+static UIVisualEffectView *blur_fill(UIView *host, UIBlurEffectStyle st) {
+	UIVisualEffectView *v = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:st]];
+	v.frame = host.bounds;
+	v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	v.userInteractionEnabled = NO;
+	[host addSubview:v];
+	[v release];
+	return v;
+}
+
+/* one row's model: a kind, its texts, and the block that applies it (the same call the ImGui row took).
+ * No ARC: every string is born owned (alloc/init or a literal) and the row releases them all. */
+enum { R_HEAD = 0, R_SWITCH, R_SEG, R_SLIDER, R_BUTTON, R_NOTE, R_PAIR, R_TEXT };
+@interface CfgRow : NSObject {
+@public
+	NSString *title, *detail, *right;
+	NSArray *seg;
+	int kind, sel, on, integral;
+	float vmin, vmax, val;
+	void (^act)(void);
+	void (^num)(double);
+	void (^pick)(int);
+	void (^flip)(int);
+}
+@end
+@implementation CfgRow
+- (void)dealloc {
+	[title release]; [detail release]; [right release]; [seg release];
+	[act release]; [num release]; [pick release]; [flip release];
+	[super dealloc];
+}
+@end
+static CfgRow *cfg_row(int kind) {
+	CfgRow *r = [[CfgRow alloc] init];
+	r->kind = kind;
+	[g_cfg_rows addObject:r];
+	[r release];
+	return r;
+}
+static void cfg_row_title(CfgRow *r, const char *s) { r->title = [[NSString alloc] initWithUTF8String:s]; }
+static CfgRow *cfg_head(const char *s) { CfgRow *r = cfg_row(R_HEAD); cfg_row_title(r, s); return r; }
+static CfgRow *cfg_note(const char *s) { CfgRow *r = cfg_row(R_NOTE); cfg_row_title(r, s); return r; }
+static CfgRow *cfg_switch(const char *s, int on, void (^flip)(int)) {
+	CfgRow *r = cfg_row(R_SWITCH); cfg_row_title(r, s); r->on = on; r->flip = [flip copy];
+	return r;
+}
+static CfgRow *cfg_segrow(const char *s, NSArray *items, int sel, void (^pick)(int)) {
+	CfgRow *r = cfg_row(R_SEG); cfg_row_title(r, s); r->seg = [items retain]; r->sel = sel; r->pick = [pick copy];
+	return r;
+}
+static CfgRow *cfg_slider(const char *s, float vmin, float vmax, float val, int integral, void (^num)(double)) {
+	CfgRow *r = cfg_row(R_SLIDER); cfg_row_title(r, s);
+	r->vmin = vmin; r->vmax = vmax; r->val = val; r->integral = integral; r->num = [num copy];
+	return r;
+}
+static CfgRow *cfg_button(const char *s, void (^act)(void)) {
+	CfgRow *r = cfg_row(R_BUTTON); cfg_row_title(r, s); r->act = [act copy];
+	return r;
+}
+
+/* the five pages as models (every block the call the ImGui page made) */
+static void cfg_page_display(void) {
+	cfg_head("Picture");
+	{
+		NSMutableArray *items = [NSMutableArray array];
+		int mx = gfx_gpu_render_scale_max(); if (mx > 3) mx = 3; if (mx < 1) mx = 1;
+		for (int n = 1; n <= mx; n++) [items addObject:[NSString stringWithFormat:@"%dx", n]];
+		CfgRow *r = cfg_segrow("Resolution", items, gfx_gpu_render_scale_wanted() - 1, ^(int i) {
+			gfx_gpu_render_scale_request(i + 1);
+		});
+		r->detail = @"The Vita's 960 x 544, drawn at a multiple";
+	}
+	if (overlay_capable("widescreen")) {
+		char cur[16]; settings_str("aspect_ratio", "native", cur, sizeof cur);
+		int v = strcmp(cur, "21:9") ? (strcmp(cur, "32:9") ? 0 : 2) : 1;
+		CfgRow *r = cfg_segrow("Widescreen", @[@"Off", @"21:9", @"32:9"], v, ^(int i) {
+			settings_set_str("aspect_ratio", i == 1 ? "21:9" : i == 2 ? "32:9" : "native"); settings_save();
+		});
+		r->detail = @"More of the game at the sides";
+	}
+	if (overlay_capable("hud") && overlay_capable("widescreen")) {
+		char cur[16]; settings_str("hud_layout", "edges", cur, sizeof cur);
+		int v = strcmp(cur, "16:9") ? (strcmp(cur, "stretch") ? 0 : 2) : 1;
+		cfg_segrow("The HUD with widescreen on", @[@"Edges", @"16:9", @"Stretched"], v, ^(int i) {
+			settings_set_str("hud_layout", i == 1 ? "16:9" : i == 2 ? "stretch" : "edges"); settings_save();
+		});
+	}
+	cfg_head("Quality");
+	if (overlay_capable("fullres")) {
+		CfgRow *r = cfg_switch("Full-resolution world", settings_int("full_res_world", 1), ^(int to) {
+			settings_set_int("full_res_world", to); settings_save();
+		});
+		r->detail = @"The 3D world drawn at the screen's own resolution. Sharper, at a GPU cost.";
+	}
+	if (overlay_capable("ssao")) {
+		{
+			CfgRow *r = cfg_switch("Ambient occlusion", settings_int("ssao", 1), ^(int to) {
+				settings_set_int("ssao", to); settings_save();
+			});
+			r->detail = @"Soft shadows where surfaces meet";
+		}
+		cfg_slider("Occlusion strength", 0, 200, (float)(settings_float("ssao_strength", 1.0) * 100.0), 1, ^(double v) {
+			settings_set_float("ssao_strength", v / 100.0); settings_save();
+		});
+	}
+	if (overlay_capable("fsr")) {
+		int v = settings_int("fsr", 0) ? 2 : settings_int("post_aa", 1) ? 1 : 0;
+		CfgRow *r = cfg_segrow("Anti-aliasing", @[@"Off", @"FXAA", @"FSR 3.1"], v, ^(int i) {
+			settings_set_int("fsr", i == 2); settings_set_int("post_aa", i == 1); settings_save();
+		});
+		r->detail = @"FSR 3.1 is experimental";
+	} else
+		cfg_switch("Anti-aliasing (FXAA)", settings_int("post_aa", 1), ^(int to) {
+			settings_set_int("post_aa", to); settings_save();
+		});
+	cfg_slider("Sharpening", 0, 100, (float)(settings_float("sharpen", 0.35) * 100.0), 1, ^(double v) {
+		settings_set_float("sharpen", v / 100.0); settings_save();
+	});
+	{
+		CfgRow *r = cfg_switch("Frame generation", settings_int("frame_gen", 0), ^(int to) {
+			settings_set_int("frame_gen", to); settings_save();
+		});
+		r->detail = @"A frame between each two of the game's, for smoother motion. Adds a little delay.";
+	}
+	{
+		static const int an[] = { 1, 2, 4, 8, 16 };
+		int cur = settings_int("anisotropy", 16), v = 4;
+		for (int i = 0; i < 5; i++) if (an[i] == cur) v = i;
+		CfgRow *r = cfg_segrow("Texture filtering", @[@"Off", @"2x", @"4x", @"8x", @"16x"], v, ^(int i) {
+			settings_set_int("anisotropy", an[i]); settings_save();
+		});
+		r->detail = @"Keeps textures crisp at an angle";
+	}
+	cfg_segrow("Shadow edges", @[@"Original", @"Soft", @"Softer"], settings_int("shadow_filter", 1), ^(int i) {
+		settings_set_int("shadow_filter", i); settings_save();
+	});
+}
+static void cfg_page_performance(void) {
+	cfg_head("Overlays");
+	{
+		CfgRow *r = cfg_segrow("On-screen stats", @[@"Off", @"FPS", @"Full"], overlay_stats_level(), ^(int i) {
+			overlay_set_stats(i);
+		});
+		r->detail = @"Frame rate and timings drawn over the game";
+	}
+	cfg_head("Now");
+	{
+		CfgRow *r = cfg_row(R_PAIR);
+		r->title = [[NSString alloc] initWithUTF8String:"Frame rate"];
+		r->right = [[NSString alloc] initWithUTF8String:"--"];
+	}
+}
+static void cfg_page_game(void) {
+	if (overlay_frame_rate_offered()) {
+		CfgRow *r = cfg_segrow("Frame rate", @[@"30", @"60"], overlay_frame_rate_wanted() >= 60 ? 1 : 0, ^(int i) {
+			overlay_frame_rate_request(i == 1 ? 60 : 30);
+		});
+		r->detail = @"60 is experimental: fixed-step parts can run fast";
+	}
+	if (overlay_lang_count() > 1) {
+		NSMutableArray *items = [NSMutableArray array];
+		for (int i = 0; i < overlay_lang_count(); i++) [items addObject:[NSString stringWithUTF8String:overlay_lang_label(i)]];
+		CfgRow *r = cfg_segrow("Language", items, overlay_lang_get(), ^(int i) {
+			overlay_lang_set(i);
+		});
+		r->detail = @"Applies the next time the game starts";
+	}
+	cfg_slider("Volume", 0, 100, overlay_opt_get("volume") * 100.0f, 0, ^(double v) {
+		overlay_set_volume((float)(v / 100.0));
+	});
+	if (overlay_game_has("fov")) {
+		CfgRow *r = cfg_slider("Field of view", 0.75, 1.5, overlay_opt_get("fov"), 0, ^(double v) { overlay_opt_set("fov", (float)v); });
+		r->detail = @"1.00x is the game's own";
+	}
+	if (overlay_game_has("view_distance"))
+		cfg_slider("View distance", 1.0, 3.0, overlay_opt_get("view"), 0, ^(double v) { overlay_opt_set("view", (float)v); });
+	if (overlay_game_has("scenery_detail"))
+		cfg_slider("Scenery detail", 1.0, 8.0, overlay_opt_get("scen"), 0, ^(double v) { overlay_opt_set("scen", (float)v); });
+	if (overlay_game_has("character_detail"))
+		cfg_slider("Character detail", 1.0, 8.0, overlay_opt_get("chr"), 0, ^(double v) { overlay_opt_set("chr", (float)v); });
+	if (overlay_game_has("online")) {
+		cfg_head("Online");
+		CfgRow *r = cfg_switch("Play online", settings_int("online", 1), ^(int to) {
+			settings_set_int("online", to); settings_save();
+		});
+		r->detail = @"With other Project Nativ players. Applies the next time the game starts.";
+	}
+}
+static void cfg_page_controls(void) {
+	cfg_head("The on-screen pad");
+	cfg_switch("On-screen controls", touchpad_on(), ^(int to) { touchpad_set_on(to); });
+	{
+		CfgRow *r = cfg_switch("Second stick", window_touchpad_rstick(), ^(int to) {
+			settings_set_int("touchpad_rstick", to); settings_save();
+		});
+		r->detail = @"A floating stick in the lower right corner";
+	}
+	cfg_slider("Pad size", 60, 160, (float)touchpad_scale(), 1, ^(double v) { touchpad_set_scale((int)(v + 0.5)); });
+	{
+		CfgRow *r = cfg_switch("Left-handed", touchpad_mirror(), ^(int to) { touchpad_set_mirror(to); });
+		r->detail = @"The stick on the right, the buttons on the left";
+	}
+	cfg_slider("Pad opacity", 10, 90, (float)settings_int("touchpad_opacity", 42), 1, ^(double v) {
+		settings_set_int("touchpad_opacity", (int)(v + 0.5)); settings_save();
+	});
+	if (overlay_gyro_present()) {
+		cfg_head("Motion");
+		{
+			CfgRow *r = cfg_switch("Gyro", overlay_gyro_get(), ^(int to) { overlay_gyro_set(to); });
+			r->detail = @"The phone stands in for the Vita's motion sensor";
+		}
+		cfg_segrow("A level phone is a Vita held", @[@"Upright", @"Flat"], overlay_gyro_pose_get(), ^(int i) { overlay_gyro_pose_set(i == 1); });
+		cfg_slider("Gyro sensitivity", 0.25, 3.0, overlay_opt_get("gyro_sens"), 0, ^(double v) { overlay_opt_set("gyro_sens", (float)v); });
+		cfg_button("Recentre the gyro", ^{ overlay_gyro_recentre(); ios_ui_haptic(0); });
+	}
+	cfg_head("The game's controls");
+	const int n = overlay_controls_count();
+	for (int i = 0; i < n; i++) {
+		const char *a = "", *p = "";
+		overlay_controls_row(i, &a, &p);
+		CfgRow *r = cfg_row(R_PAIR);
+		r->title = [[NSString alloc] initWithUTF8String:a ? a : ""];
+		r->right = [[NSString alloc] initWithUTF8String:(p && *p) ? p : ""];
+	}
+}
+static void cfg_page_help(void) {
+	cfg_head("The controls");
+	cfg_note("Your thumbs: the stick at the left edge, the face buttons at the right, the shoulders at the top corners. Touch anywhere else in the lower right for the second stick.");
+	cfg_note("The picture itself is the Vita's touch screen: tap and drag it as you would the real thing.");
+	cfg_note("Pull down from the top of the screen for the quick menu; Game > All settings opens this one, and pauses the game while it is up.");
+	cfg_head("About");
+	{
+		CfgRow *r = cfg_row(R_TEXT);
+		r->title = [[NSString alloc] initWithUTF8String:"Project Nativ"];
+		r->detail = [[NSString alloc] initWithUTF8String:"This PS Vita game, statically recompiled to native code, running on this phone's own CPU and GPU."];
+	}
+	cfg_note("The quick menu pulls down from the top of the screen. The little eye at the top left turns the on-screen controls off and on.");
+}
+
+static void cfg_close(void);
+/* the table's host: the datasource and the delegate, one object for the app's life */
+@interface CfgCenter : NSObject <UITableViewDataSource, UITableViewDelegate>
+- (void)done;
+@end
+static CfgCenter *g_cfg_center;
+@implementation CfgCenter
+- (void)done { ios_ui_haptic(0); cfg_close(); }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { (void)tv; (void)s; return (NSInteger)[g_cfg_rows count]; }
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+	CfgRow *r = [g_cfg_rows objectAtIndex:[ip row]];
+	switch (r->kind) {
+	case R_SLIDER: return 64.0f;
+	case R_HEAD: return 34.0f;
+	case R_TEXT: return 76.0f;
+	case R_NOTE: {
+		static UILabel *m;
+		if (!m) { m = [[UILabel alloc] initWithFrame:CGRectZero]; m.font = [UIFont systemFontOfSize:13.0f]; m.numberOfLines = 0; [m retain]; }
+		m.text = r->title;
+		const CGSize sz = [m sizeThatFits:CGSizeMake(tv.bounds.size.width - 76.0f, 2000.0f)];
+		return sz.height + 16.0f;
+	}
+	case R_SWITCH: case R_SEG:
+		return r->detail ? 56.0f : 44.0f;
+	default:
+		return 44.0f;
+	}
+}
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+	static NSString *const ids[8] = { @"h", @"s", @"g", @"l", @"b", @"n", @"p", @"t" };
+	CfgRow *r = [g_cfg_rows objectAtIndex:[ip row]];
+	NSString *id = ids[r->kind < 8 ? r->kind : 0];
+	UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
+	if (!cell) {
+		cell = [[[UITableViewCell alloc] initWithStyle:((r->kind == R_SWITCH || r->kind == R_SEG) ? UITableViewCellStyleSubtitle : UITableViewCellStyleDefault) reuseIdentifier:id] autorelease];
+		if (r->kind == R_HEAD) { cell.separatorInset = UIEdgeInsetsMake(0, 0, 0, CGFLOAT_MAX); cell.selectionStyle = UITableViewCellSelectionStyleNone; }
+		if (r->kind == R_NOTE || r->kind == R_TEXT) { cell.selectionStyle = UITableViewCellSelectionStyleNone; cell.separatorInset = UIEdgeInsetsMake(0, 0, 0, CGFLOAT_MAX); }
+	}
+	g_keep = g_cfg_keep;
+	switch (r->kind) {
+	case R_HEAD:
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightSemibold];
+		cell.textLabel.textColor = rgba(240, 192, 96, 0.85f);
+		break;
+	case R_SWITCH: {
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
+		cell.textLabel.textColor = [UIColor labelColor];
+		cell.detailTextLabel.text = r->detail;
+		cell.detailTextLabel.font = [UIFont systemFontOfSize:11.5f];
+		cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+		cell.detailTextLabel.numberOfLines = 0;
+		UISwitch *sw = [[UISwitch alloc] init];
+		sw.on = r->on != 0;
+		sw.onTintColor = rgba(240, 192, 96, 0.92f);
+		__block UISwitch *wsw = sw;
+		[sw addTarget:[BN act:^{ ios_ui_haptic(0); r->flip(wsw.on); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+		cell.accessoryView = sw;   /* the cell owns it from here */
+		[sw release];
+		break;
+	}
+	case R_SEG: {
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
+		cell.textLabel.textColor = [UIColor labelColor];
+		cell.detailTextLabel.text = r->detail;
+		cell.detailTextLabel.font = [UIFont systemFontOfSize:11.5f];
+		cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+		cell.detailTextLabel.numberOfLines = 0;
+		UISegmentedControl *sg = [[UISegmentedControl alloc] initWithItems:r->seg];
+		sg.selectedSegmentIndex = r->sel;
+		sg.backgroundColor = [UIColor tertiarySystemFillColor];
+		sg.selectedSegmentTintColor = rgba(240, 192, 96, 0.92f);
+		[sg setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor labelColor]} forState:UIControlStateNormal];
+		[sg setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor]} forState:UIControlStateSelected];
+		__block UISegmentedControl *wsg = sg;
+		[sg addTarget:[BN act:^{ ios_ui_haptic(0); r->pick((int)wsg.selectedSegmentIndex); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+		[sg sizeToFit];
+		cell.accessoryView = sg;
+		[sg release];
+		break;
+	}
+	case R_SLIDER: {
+		const CGFloat cw = cell.contentView.bounds.size.width;
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
+		cell.textLabel.textColor = [UIColor labelColor];
+		UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(cw - 92.0f, 13.0f, 76.0f, 19.0f)];
+		vl.font = [UIFont monospacedDigitSystemFontOfSize:12.0f weight:UIFontWeightRegular];
+		vl.textColor = [UIColor secondaryLabelColor];
+		vl.textAlignment = NSTextAlignmentRight;
+		NSString *(^fmt)(double) = ^(double v) { return r->integral ? [NSString stringWithFormat:@"%.0f", v] : [NSString stringWithFormat:@"%.2fx", v]; };
+		vl.text = fmt(r->val);
+		[cell.contentView addSubview:vl];
+		[vl release];
+		UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(16.0f, 34.0f, cw - 32.0f, 28.0f)];
+		sl.minimumValue = r->vmin; sl.maximumValue = r->vmax; sl.value = r->val;
+		sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
+		__block UISlider *wsl = sl; __block UILabel *wvl = vl;
+		[sl addTarget:[BN act:^{ wvl.text = fmt(wsl.value); if (r->num) r->num(wsl.value); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+		[sl addTarget:[BN act:^{ if (r->num) r->num(wsl.value); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+		[cell.contentView addSubview:sl];
+		[sl release];
+		break;
+	}
+	case R_BUTTON:
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
+		cell.textLabel.textColor = [UIColor labelColor];
+		cell.accessoryView = nil;
+		break;
+	case R_NOTE:
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:13.0f];
+		cell.textLabel.textColor = [UIColor secondaryLabelColor];
+		cell.textLabel.numberOfLines = 0;
+		break;
+	case R_PAIR: {
+		const CGFloat cw = cell.contentView.bounds.size.width;
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:14.5f];
+		cell.textLabel.textColor = [UIColor labelColor];
+		UILabel *rl = nil;
+		for (UIView *v in cell.contentView.subviews) if ([v isKindOfClass:[UILabel class]] && v != cell.textLabel) { rl = (UILabel *)v; break; }
+		if (!rl) {
+			rl = [[UILabel alloc] initWithFrame:CGRectMake(cw - 150.0f, 13.0f, 136.0f, 19.0f)];
+			rl.font = [UIFont systemFontOfSize:12.5f];
+			rl.textColor = [UIColor secondaryLabelColor];
+			rl.textAlignment = NSTextAlignmentRight;
+			rl.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+			[cell.contentView addSubview:rl];
+			[rl release];
+		}
+		rl.text = r->right;
+		if ([r->title isEqualToString:@"Frame rate"]) g_cfg_fps = rl;   /* the tick writes it live (set at configure: the reload is lazy) */
+		break;
+	}
+	case R_TEXT:
+		cell.textLabel.text = r->title;
+		cell.textLabel.font = [UIFont systemFontOfSize:19.0f weight:UIFontWeightSemibold];
+		cell.textLabel.textColor = [UIColor whiteColor];
+		{
+			UILabel *dl = nil;
+			for (UIView *v in cell.contentView.subviews) if ([v isKindOfClass:[UILabel class]] && v != cell.textLabel) { dl = (UILabel *)v; break; }
+			if (!dl) {
+				dl = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, 42.0f, cell.contentView.bounds.size.width - 32.0f, 28.0f)];
+				dl.font = [UIFont systemFontOfSize:12.5f];
+				dl.textColor = [UIColor secondaryLabelColor];
+				dl.numberOfLines = 2;
+				[cell.contentView addSubview:dl];
+				[dl release];
+			}
+			dl.text = r->detail;
+		}
+		break;
+	}
+	return cell;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+	CfgRow *r = [g_cfg_rows objectAtIndex:[ip row]];
+	if (r->kind == R_BUTTON) { ios_ui_haptic(0); if (r->act) r->act(); }
+	[tv deselectRowAtIndexPath:ip animated:YES];
+}
+- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip { (void)tv; (void)ip; cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; }
+@end
 
 static void cfg_close(void) {
 	if (!g_cfg_dim) return;
@@ -894,346 +1318,96 @@ static void cfg_close(void) {
 	g_cfg_page = -1;
 	overlay_close();   /* resumes, exactly the close the ImGui menu's Resume took */
 }
-static float cfg_vw(void) { return g_cfg_card ? g_cfg_card.bounds.size.width : 0; }
-
-/* the center's own row primitives (g_rows points at the scroll while a page builds) */
-static void cfg_head(const char *s) {
-	UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(14, cfg_y, 300, 16)];
-	l.text = [NSString stringWithUTF8String:s];
-	l.font = [UIFont systemFontOfSize:11.5f weight:UIFontWeightMedium];
-	l.textColor = rgba(240, 192, 96, 0.85f);
-	[g_rows addSubview:l]; [l release];
-	cfg_y += 24;
-}
-static void cfg_note(const char *s) {
-	UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(16, cfg_y, cfg_vw() - 32, 15)];
-	l.text = [NSString stringWithUTF8String:s];
-	l.font = [UIFont systemFontOfSize:10.0f]; l.textColor = rgba(130, 136, 152, 1.0f);
-	l.numberOfLines = 2;
-	const CGSize sz = [l sizeThatFits:CGSizeMake(cfg_vw() - 32, 200)];
-	l.frame = CGRectMake(16, cfg_y, cfg_vw() - 32, sz.height);
-	[g_rows addSubview:l]; [l release];
-	cfg_y += sz.height + 4;
-}
-static void cfg_gap(CGFloat h) { cfg_y += h; }
-static void cfg_rule(void) {
-	UIView *v = [[UIView alloc] initWithFrame:CGRectMake(12, cfg_y + 5, cfg_vw() - 24, 1)];
-	v.backgroundColor = rgba(255, 255, 255, 0.08f);
-	[g_rows addSubview:v]; [v release];
-	cfg_y += 12;
-}
-static void cfg_button(const char *title, void (^blk)(void)) {
-	UIButton *b = panel_button(CGRectMake(6, cfg_y, cfg_vw() - 12, 34), [NSString stringWithUTF8String:title]);
-	panel_fire_on_highlight(b, blk);
-	cfg_y += 36;
-}
-static void cfg_toggle(const char *title, int on, void (^flip)(int to)) {
-	UIButton *b = panel_button(CGRectMake(6, cfg_y, cfg_vw() - 12, 34), [NSString stringWithUTF8String:title]);
-	UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(cfg_vw() - 60, cfg_y + 2, 51, 31)];
-	sw.on = on != 0;
-	sw.onTintColor = rgba(240, 192, 96, 0.90f);
-	__block UISwitch *wsw = sw;   /* no ARC: the block must not retain the switch that targets it */
-	[sw addTarget:[BN act:^{ ios_ui_haptic(0); flip(wsw.on); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-	[g_rows addSubview:sw]; [sw release];
-	__block UISwitch *wsw2 = sw;
-	panel_fire_on_highlight(b, ^{ wsw2.on = !wsw2.on; ios_ui_haptic(0); flip(wsw2.on); });
-	cfg_y += 36;
-}
-static void cfg_seg(const char *title, NSArray *items, NSInteger cur, void (^pick)(NSInteger i)) {
-	if (title) {
-		UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(14, cfg_y + 2, cfg_vw() - 28, 19)];
-		l.text = [NSString stringWithUTF8String:title];
-		l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
-		[g_rows addSubview:l]; [l release];
-		cfg_y += 22;
+static void cfg_page_build(int tab) {
+	[g_cfg_rows removeAllObjects];
+	switch (tab) {
+	case 0: cfg_page_display(); break;
+	case 1: cfg_page_performance(); break;
+	case 2: cfg_page_game(); break;
+	case 3: cfg_page_controls(); break;
+	default: cfg_page_help(); break;
 	}
-	UISegmentedControl *s = [[UISegmentedControl alloc] initWithItems:items];
-	s.frame = CGRectMake(14, cfg_y, cfg_vw() - 28, 28);
-	s.selectedSegmentIndex = cur;
-	s.backgroundColor = rgba(255, 255, 255, 0.12f);
-	s.selectedSegmentTintColor = rgba(240, 192, 96, 0.85f);
-	[s setTitleTextAttributes:@{NSForegroundColorAttributeName: rgba(235, 240, 255, 0.9f)} forState:UIControlStateNormal];
-	[s setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor]} forState:UIControlStateSelected];
-	__block UISegmentedControl *ws = s;   /* no ARC: as above */
-	[s addTarget:[BN act:^{ ios_ui_haptic(0); pick(ws.selectedSegmentIndex); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-	[g_rows addSubview:s]; [s release];
-	cfg_y += 38;
-}
-static void cfg_slider(const char *title, float vmin, float vmax, float val, int integral,
-                       void (^live)(float v), void (^commit)(float v), const char *unit) {
-	UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(14, cfg_y + 2, cfg_vw() - 90, 19)];
-	l.text = [NSString stringWithUTF8String:title];
-	l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
-	[g_rows addSubview:l]; [l release];
-	UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(cfg_vw() - 76, cfg_y + 2, 62, 19)];
-	vl.font = bar_row_font(); vl.textColor = rgba(150, 156, 172, 1.0f); vl.textAlignment = NSTextAlignmentRight;
-	if (integral) vl.text = [NSString stringWithFormat:@"%.0f%s", val, unit];
-	else vl.text = [NSString stringWithFormat:@"%.2f%s", val, unit];
-	[g_rows addSubview:vl]; [vl release];
-	UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(14, cfg_y + 22, cfg_vw() - 28, 24)];
-	sl.minimumValue = vmin; sl.maximumValue = vmax; sl.value = val;
-	sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
-	__block UISlider *wsl = sl; __block UILabel *wvl = vl;
-	NSString *(^fmt)(float) = ^(float v) {
-		return integral ? [NSString stringWithFormat:@"%.0f%s", v, unit] : [NSString stringWithFormat:@"%.2f%s", v, unit];
-	};
-	[sl addTarget:[BN act:^{ wvl.text = fmt(wsl.value); if (live) live(wsl.value); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-	[sl addTarget:[BN act:^{ if (commit) commit(wsl.value); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-	[g_rows addSubview:sl]; [sl release];
-	cfg_y += 44;
-}
-
-/* the pages (square brackets of phone-relevant rows; every one the ImGui page's own call) */
-static void cfg_page_display(void) {
-	cfg_head("Picture");
-	{
-		NSMutableArray *items = [NSMutableArray array];
-		int mx = gfx_gpu_render_scale_max(); if (mx > 3) mx = 3; if (mx < 1) mx = 1;
-		for (int n = 1; n <= mx; n++) [items addObject:[NSString stringWithFormat:@"%dx", n]];
-		const CGFloat k = 14.0f;
-		NSString *lbl = [NSString stringWithFormat:@"Resolution  (the Vita's 960 x 544 drawn %dx)", gfx_gpu_render_scale_wanted()];
-		UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(k, cfg_y + 2, cfg_vw() - 2 * k, 19)];
-		l.text = lbl; l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
-		[g_rows addSubview:l]; [l release];
-		cfg_y += 22;
-		UISegmentedControl *s = [[UISegmentedControl alloc] initWithItems:items];
-		s.frame = CGRectMake(k, cfg_y, cfg_vw() - 2 * k, 28);
-		s.selectedSegmentIndex = gfx_gpu_render_scale_wanted() - 1;
-		s.backgroundColor = rgba(255, 255, 255, 0.12f); s.selectedSegmentTintColor = rgba(240, 192, 96, 0.85f);
-		[s setTitleTextAttributes:@{NSForegroundColorAttributeName: rgba(235, 240, 255, 0.9f)} forState:UIControlStateNormal];
-		[s setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor]} forState:UIControlStateSelected];
-		__block UISegmentedControl *ws = s;
-		[s addTarget:[BN act:^{ ios_ui_haptic(0); gfx_gpu_render_scale_request((int)ws.selectedSegmentIndex + 1); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-		[g_rows addSubview:s]; [s release];
-		cfg_y += 38;
-	}
-	if (overlay_capable("widescreen")) {
-		char cur[16]; settings_str("aspect_ratio", "native", cur, sizeof cur);
-		int v = strcmp(cur, "21:9") ? (strcmp(cur, "32:9") ? 0 : 2) : 1;
-		cfg_seg("Widescreen (more of the game at the sides)", @[@"Off", @"21:9", @"32:9"], v, ^(NSInteger i) {
-			settings_set_str("aspect_ratio", i == 1 ? "21:9" : i == 2 ? "32:9" : "native"); settings_save();
-		});
-	}
-	if (overlay_capable("hud") && overlay_capable("widescreen")) {
-		char cur[16]; settings_str("hud_layout", "edges", cur, sizeof cur);
-		int v = strcmp(cur, "16:9") ? (strcmp(cur, "stretch") ? 0 : 2) : 1;
-		cfg_seg("The HUD with widescreen on", @[@"Edges", @"16:9", @"Stretched"], v, ^(NSInteger i) {
-			settings_set_str("hud_layout", i == 1 ? "16:9" : i == 2 ? "stretch" : "edges"); settings_save();
-		});
-	}
-	cfg_rule();
-	cfg_head("Quality");
-	if (overlay_capable("fullres"))
-		cfg_toggle("Full-resolution world", settings_int("full_res_world", 1), ^(int to) {
-			settings_set_int("full_res_world", to); settings_save();
-		});
-	if (overlay_capable("ssao")) {
-		cfg_toggle("Ambient occlusion (soft contact shadows)", settings_int("ssao", 1), ^(int to) {
-			settings_set_int("ssao", to); settings_save();
-		});
-		cfg_slider("Occlusion strength", 0.0f, 200.0f, settings_float("ssao_strength", 1.0) * 100.0f, 1, nil, ^(float v) {
-			settings_set_float("ssao_strength", v / 100.0); settings_save();
-		}, "%%");
-	}
-	if (overlay_capable("fsr")) {
-		int v = settings_int("fsr", 0) ? 2 : settings_int("post_aa", 1) ? 1 : 0;
-		cfg_seg("Anti-aliasing", @[@"Off", @"FXAA", @"FSR 3.1 (experimental)"], v, ^(NSInteger i) {
-			settings_set_int("fsr", i == 2); settings_set_int("post_aa", i == 1); settings_save();
-		});
-	} else
-		cfg_toggle("Anti-aliasing (FXAA)", settings_int("post_aa", 1), ^(int to) {
-			settings_set_int("post_aa", to); settings_save();
-		});
-	cfg_slider("Sharpening", 0.0f, 100.0f, settings_float("sharpen", 0.35) * 100.0f, 1, nil, ^(float v) {
-		settings_set_float("sharpen", v / 100.0); settings_save();
-	}, "%%");
-	cfg_toggle("Frame generation (a frame between each two of the game's)", settings_int("frame_gen", 0), ^(int to) {
-		settings_set_int("frame_gen", to); settings_save();
-	});
-	{
-		static const int an[] = { 1, 2, 4, 8, 16 };
-		int cur = settings_int("anisotropy", 16), v = 4;
-		for (int i = 0; i < 5; i++) if (an[i] == cur) v = i;
-		cfg_seg("Texture filtering", @[@"Off", @"2x", @"4x", @"8x", @"16x"], v, ^(NSInteger i) {
-			settings_set_int("anisotropy", an[i]); settings_save();
-		});
-	}
-	cfg_seg("Shadow edges", @[@"Original", @"Soft", @"Softer"], settings_int("shadow_filter", 1), ^(NSInteger i) {
-		settings_set_int("shadow_filter", (int)i); settings_save();
-	});
-}
-static void cfg_page_performance(void) {
-	cfg_head("Overlays");
-	const int lvl = overlay_stats_level();
-	cfg_seg("On-screen stats (frame rate and timings over the game)", @[@"Off", @"FPS", @"Full"], lvl, ^(NSInteger i) {
-		overlay_set_stats((int)i);
-	});
-	cfg_gap(6);
-	g_cfg_fps = [[UILabel alloc] initWithFrame:CGRectMake(14, cfg_y, cfg_vw() - 28, 30)];
-	g_cfg_fps.font = [UIFont monospacedDigitSystemFontOfSize:20.0f weight:UIFontWeightSemibold];
-	g_cfg_fps.textColor = rgba(240, 192, 96, 1.0f);
-	g_cfg_fps.text = [NSString stringWithFormat:@"%.0f fps", overlay_fps()];
-	[g_rows addSubview:g_cfg_fps]; [g_cfg_fps release];
-	cfg_y += 38;
-}
-static void cfg_page_game(void) {
-	if (overlay_frame_rate_offered()) {
-		const int fr = overlay_frame_rate_wanted();
-		cfg_seg("Frame rate (60 is experimental: fixed-step parts can run fast)", @[@"30", @"60"], fr >= 60 ? 1 : 0, ^(NSInteger i) {
-			overlay_frame_rate_request(i == 1 ? 60 : 30);
-		});
-		cfg_gap(2);
-	}
-	if (overlay_lang_count() > 1) {
-		NSMutableArray *items = [NSMutableArray array];
-		for (int i = 0; i < overlay_lang_count(); i++) [items addObject:[NSString stringWithUTF8String:overlay_lang_label(i)]];
-		cfg_seg("Language (applies the next time the game starts)", items, overlay_lang_get(), ^(NSInteger i) {
-			overlay_lang_set((int)i);
-		});
-	}
-	cfg_slider("Volume", 0.0f, 100.0f, overlay_opt_get("volume") * 100.0f, 1, ^(float v) { overlay_set_volume(v / 100.0f); }, ^(float v) { overlay_set_volume(v / 100.0f); }, "%%");
-	if (overlay_game_has("fov"))
-		cfg_slider("Field of view", 0.75f, 1.5f, overlay_opt_get("fov"), 0, nil, ^(float v) { overlay_opt_set("fov", v); }, "x");
-	if (overlay_game_has("view_distance"))
-		cfg_slider("View distance", 1.0f, 3.0f, overlay_opt_get("view"), 0, nil, ^(float v) { overlay_opt_set("view", v); }, "x");
-	if (overlay_game_has("scenery_detail"))
-		cfg_slider("Scenery detail", 1.0f, 8.0f, overlay_opt_get("scen"), 0, nil, ^(float v) { overlay_opt_set("scen", v); }, "x");
-	if (overlay_game_has("character_detail"))
-		cfg_slider("Character detail", 1.0f, 8.0f, overlay_opt_get("chr"), 0, nil, ^(float v) { overlay_opt_set("chr", v); }, "x");
-	if (overlay_game_has("online")) {
-		cfg_head("Online");
-		cfg_toggle("Play online (applies the next time the game starts)", settings_int("online", 1), ^(int to) {
-			settings_set_int("online", to); settings_save();
-		});
-	}
-}
-static void cfg_page_controls(void) {
-	cfg_head("The on-screen pad");
-	cfg_toggle("On-screen controls", touchpad_on(), ^(int to) { touchpad_set_on(to); });
-	cfg_toggle("Second stick (the lower right corner)", window_touchpad_rstick(), ^(int to) {
-		settings_set_int("touchpad_rstick", to); settings_save();
-	});
-	cfg_slider("Pad size", 60.0f, 160.0f, (float)touchpad_scale(), 1,
-	           ^(float v) { touchpad_set_scale((int)(v + 0.5f)); }, ^(float v) { touchpad_set_scale((int)(v + 0.5f)); }, "%%");
-	cfg_gap(2);
-	cfg_toggle("Left-handed (the sides swapped)", touchpad_mirror(), ^(int to) { touchpad_set_mirror(to); });
-	cfg_slider("Pad opacity", 10.0f, 90.0f, (float)settings_int("touchpad_opacity", 42), 1, nil, ^(float v) {
-		settings_set_int("touchpad_opacity", (int)(v + 0.5f)); settings_save();
-	}, "%%");
-	if (overlay_gyro_present()) {
-		cfg_rule();
-		cfg_head("Motion");
-		cfg_toggle("Gyro (the phone stands in for the Vita's motion sensor)", overlay_gyro_get(), ^(int to) { overlay_gyro_set(to); });
-		cfg_seg("A level phone is a Vita held", @[@"Upright", @"Flat"], overlay_gyro_pose_get(), ^(NSInteger i) { overlay_gyro_pose_set(i == 1); });
-		cfg_slider("Gyro sensitivity", 0.25f, 3.0f, overlay_opt_get("gyro_sens"), 0, nil, ^(float v) { overlay_opt_set("gyro_sens", v); }, "x");
-		cfg_button("Recentre the gyro", ^{ overlay_gyro_recentre(); ios_ui_haptic(0); });
-	}
-	cfg_rule();
-	cfg_head("The game's controls");
-	const int n = overlay_controls_count();
-	for (int i = 0; i < n; i++) {
-		const char *a = "", *p = "";
-		overlay_controls_row(i, &a, &p);
-		UILabel *al = [[UILabel alloc] initWithFrame:CGRectMake(16, cfg_y + 1, cfg_vw() * 0.55f, 17)];
-		al.text = [NSString stringWithUTF8String:a];
-		al.font = [UIFont systemFontOfSize:12.0f]; al.textColor = rgba(234, 236, 244, 0.94f);
-		[g_rows addSubview:al]; [al release];
-		UILabel *pl = [[UILabel alloc] initWithFrame:CGRectMake(cfg_vw() * 0.6f, cfg_y + 1, cfg_vw() * 0.4f - 16, 17)];
-		pl.text = [NSString stringWithUTF8String:p && *p ? p : ""];
-		pl.font = [UIFont systemFontOfSize:11.0f]; pl.textColor = rgba(150, 156, 172, 1.0f);
-		pl.textAlignment = NSTextAlignmentRight;
-		[g_rows addSubview:pl]; [pl release];
-		cfg_y += 22;
-	}
-}
-static void cfg_page_help(void) {
-	cfg_head("The controls");
-	cfg_note("Your thumbs: the stick at the left edge, the face buttons at the right, the shoulders at the top corners. Touch anywhere else in the lower right for the second stick.");
-	cfg_gap(2);
-	cfg_note("The picture itself is the Vita's touch screen: tap and drag it as you would the real thing.");
-	cfg_gap(2);
-	cfg_note("Pull down from the top of the screen for the quick menu; Game > All settings opens this menu, and pauses the game while it is up.");
-	cfg_rule();
-	cfg_head("About");
-	{
-		UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(16, cfg_y, cfg_vw() - 32, 22)];
-		t.text = @"Project Nativ"; t.font = [UIFont systemFontOfSize:16.0f weight:UIFontWeightBold];
-		t.textColor = [UIColor whiteColor];
-		[g_rows addSubview:t]; [t release];
-		cfg_y += 28;
-	}
-	cfg_note("This PS Vita game, statically recompiled to native code, running on this phone's own CPU and GPU.");
-	cfg_note("The quick menu pulls down from the top of the screen. The little eye at the top left turns the on-screen controls off and on.");
 }
 static void cfg_rebuild(void) {
-	[g_cfg_keep removeAllObjects];
-	for (UIView *v in [g_cfg_scr.subviews copy]) [v removeFromSuperview];
-	g_cfg_fps = nil;
-	g_rows = g_cfg_scr; g_keep = g_cfg_keep;
-	cfg_y = 10;
-	static void (*const pages[5])(void) = { cfg_page_display, cfg_page_performance, cfg_page_game, cfg_page_controls, cfg_page_help };
+	g_keep = g_cfg_keep;
 	const int tab = g_cfg_page >= 0 && g_cfg_page < 5 ? g_cfg_page : 0;
-	for (int i = 0; i < 5; i++) {   /* the tab row's own highlight */
-		[g_cfg_tab[i] setTitleColor:i == tab ? [UIColor whiteColor] : rgba(160, 166, 180, 1.0f) forState:UIControlStateNormal];
+	cfg_page_build(tab);
+	g_cfg_nav.topItem.title = [NSString stringWithUTF8String:cfg_tab_names[tab]];
+	g_cfg_segs.selectedSegmentIndex = tab;
+	g_cfg_fps = nil;
+	[g_cfg_tbl reloadData];
+	[g_cfg_tbl setContentOffset:CGPointZero animated:NO];
+	/* the Performance page's live number: its row's own right label (weakly ours; the tick writes it) */
+	for (NSUInteger i = 0; i < [g_cfg_rows count]; i++) {
+		CfgRow *r = [g_cfg_rows objectAtIndex:i];
+		if (r->kind == R_PAIR && [r->title isEqualToString:@"Frame rate"]) {
+			UITableViewCell *c = [g_cfg_tbl cellForRowAtIndexPath:[NSIndexPath indexPathForRow:(NSInteger)i inSection:0]];
+			if (c) {
+				for (UIView *v in c.contentView.subviews) if ([v isKindOfClass:[UILabel class]] && v != c.textLabel) { g_cfg_fps = (UILabel *)v; break; }
+			}
+		}
 	}
-	pages[tab]();
-	g_cfg_scr.contentSize = CGSizeMake(g_cfg_scr.bounds.size.width, cfg_y + 16);
 }
 static void cfg_make(void) {
 	if (g_cfg_dim) return;
 	g_cfg_keep = [[NSMutableArray alloc] init];
 	g_keep = g_cfg_keep;
+	g_cfg_rows = [[NSMutableArray alloc] init];
+	g_cfg_center = [[CfgCenter alloc] init];
 	g_cfg_dim = [[UIView alloc] initWithFrame:g_host.bounds];
 	g_cfg_dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	g_cfg_dim.backgroundColor = rgba(0, 0, 0, 0.62f);
+	g_cfg_dim.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.55f];
 	[g_cfg_dim addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:[BN act:^{ cfg_close(); }] action:@selector(fire)]];
 	[g_host addSubview:g_cfg_dim];
 	[g_cfg_dim release];
 	const CGRect hb = g_host.bounds;
 	g_cfg_card = [[UIView alloc] initWithFrame:CGRectInset(hb, 14, 14)];
 	g_cfg_card.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	g_cfg_card.backgroundColor = rgba(26, 28, 34, 0.98f);
-	g_cfg_card.layer.cornerRadius = 14.0f;
-	g_cfg_card.layer.borderColor = rgba(255, 255, 255, 0.10f).CGColor;
-	g_cfg_card.layer.borderWidth = 0.5f;
+	g_cfg_card.layer.cornerRadius = 16.0f;
+	g_cfg_card.layer.masksToBounds = YES;
+	blur_fill(g_cfg_card, UIBlurEffectStyleSystemMaterialDark);
 	[g_host addSubview:g_cfg_card];
 	[g_cfg_card release];
-	/* the tabs: Display / Performance / Game / Controls / Help, Done at the right */
+	/* the navigation bar: the page's name, Done at the right (the system's own button, the amber tint) */
+	g_cfg_nav = [[UINavigationBar alloc] initWithFrame:CGRectMake(0, 0, g_cfg_card.bounds.size.width, 44)];
+	g_cfg_nav.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+	g_cfg_nav.barStyle = UIBarStyleBlack;
+	g_cfg_nav.translucent = YES;
+	g_cfg_nav.tintColor = rgba(240, 192, 96, 1.0f);
 	{
-		CGFloat tx = 14;
-		for (int i = 0; i < 5; i++) {
-			NSString *t = [NSString stringWithUTF8String:cfg_tab_names[i]];
-			UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-			b.frame = CGRectMake(tx, 9, 0, 26);
-			[b setTitle:t forState:UIControlStateNormal];
-			b.titleLabel.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightSemibold];
-			[b setTitleColor:rgba(160, 166, 180, 1.0f) forState:UIControlStateNormal];
-			[b sizeToFit];
-			CGRect f = b.frame; f.size.width += 18; f.size.height = 26; b.frame = f;
-			const int ti = i;
-			[b addTarget:[BN act:^{ ios_ui_haptic(0); g_cfg_page = ti; cfg_rebuild(); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-			[g_cfg_card addSubview:b];
-			g_cfg_tab[i] = b;
-			tx += f.size.width + 10;
-		}
-		UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-		[done setTitle:@"Done" forState:UIControlStateNormal];
-		done.titleLabel.font = [UIFont systemFontOfSize:14.0f weight:UIFontWeightSemibold];
-		[done setTitleColor:rgba(240, 192, 96, 1.0f) forState:UIControlStateNormal];
-		[done sizeToFit];
-		CGRect f = done.frame; f.size.width += 20; f.size.height = 28; f.origin = CGPointMake(g_cfg_card.bounds.size.width - f.size.width - 12, 8);
-		done.frame = f;
-		done.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-		[done addTarget:[BN act:^{ ios_ui_haptic(0); cfg_close(); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-		[g_cfg_card addSubview:done];
+		UIImage *empty = [UIImage new];
+		[g_cfg_nav setBackgroundImage:empty forBarMetrics:UIBarMetricsDefault];
+		g_cfg_nav.shadowImage = empty;
+		[empty release];
 	}
-	g_cfg_scr = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 44, g_cfg_card.bounds.size.width, g_cfg_card.bounds.size.height - 44)];
-	g_cfg_scr.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	g_cfg_scr.showsVerticalScrollIndicator = YES;
-	g_cfg_scr.indicatorStyle = UIScrollViewIndicatorStyleWhite;
-	g_cfg_scr.backgroundColor = [UIColor clearColor];
-	[g_cfg_card addSubview:g_cfg_scr];
-	[g_cfg_scr release];
+	UINavigationItem *it = [[UINavigationItem alloc] initWithTitle:@"Display"];
+	it.rightBarButtonItem = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:g_cfg_center action:@selector(done)] autorelease];
+	[g_cfg_nav pushNavigationItem:it animated:NO];
+	[it release];
+	[g_cfg_card addSubview:g_cfg_nav];
+	[g_cfg_nav release];
+	/* the five pages: a real segmented control */
+	g_cfg_segs = [[UISegmentedControl alloc] initWithFrame:CGRectMake(14, 48, g_cfg_card.bounds.size.width - 28, 32)];
+	g_cfg_segs.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+	g_cfg_segs.backgroundColor = [UIColor tertiarySystemFillColor];
+	g_cfg_segs.selectedSegmentTintColor = rgba(240, 192, 96, 0.92f);
+	[g_cfg_segs setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor labelColor]} forState:UIControlStateNormal];
+	[g_cfg_segs setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor]} forState:UIControlStateSelected];
+	for (int i = 0; i < 5; i++) [g_cfg_segs insertSegmentWithTitle:[NSString stringWithUTF8String:cfg_tab_names[i]] atIndex:i animated:NO];
+	__block UISegmentedControl *wsg = g_cfg_segs;
+	[g_cfg_segs addTarget:[BN act:^{ ios_ui_haptic(0); g_cfg_page = (int)wsg.selectedSegmentIndex; cfg_rebuild(); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+	[g_cfg_card addSubview:g_cfg_segs];
+	[g_cfg_segs release];
+	/* the page itself: a real table, inset-grouped (the Settings app's own look) */
+	g_cfg_tbl = [[UITableView alloc] initWithFrame:CGRectMake(10, 86, g_cfg_card.bounds.size.width - 20, g_cfg_card.bounds.size.height - 96) style:UITableViewStyleInsetGrouped];
+	g_cfg_tbl.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	g_cfg_tbl.dataSource = g_cfg_center;
+	g_cfg_tbl.delegate = g_cfg_center;
+	g_cfg_tbl.backgroundColor = [UIColor clearColor];
+	g_cfg_tbl.separatorColor = rgba(255, 255, 255, 0.08f);
+	[g_cfg_card addSubview:g_cfg_tbl];
+	[g_cfg_tbl release];
+	chrome_log("    chrome: settings center made (%.0f x %.0f card)", g_cfg_card.bounds.size.width, g_cfg_card.bounds.size.height);
 }
 void ios_ui_settings_open(int tab) {
 	if (!g_installed) return;
