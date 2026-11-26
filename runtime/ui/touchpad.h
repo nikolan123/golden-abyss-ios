@@ -11,13 +11,18 @@
  *
  *
  *        ( O )                                          ( ^ )
- *      left stick                                    ( < ) ( > )   face buttons
+ *      left pocket                                    ( < ) ( > )   face buttons
  *                                                        ( v )
  *
- * The left stick is fixed -- a thumb finds it without looking. The right stick is
- * floating: it appears under the thumb anywhere in the lower-right that is not the
- * face cluster, which is how a phone actually plays; its base stays where the finger
- * landed and the knob follows.
+ * Both sticks are dynamic: a finger that lands in a pocket is the game's own
+ * touch first -- a quick tap is a tap, wherever it lands -- and the moment it
+ * holds (a sixth of a second) or drags (past ~12 points), its pocket's stick
+ * spawns under it: base where the thumb landed, knob following. The movement
+ * stick's pocket is the lower left (mirrored for the left-handed); the second
+ * stick's is the lower right, and only where RECOMP_TOUCHPAD_RSTICK allows one.
+ * The buttons and the shoulders are claimed the moment a finger touches them.
+ * Tapping (not holding) the pad's controls is a control; everything else is
+ * the game's screen.
  */
 #ifndef RECOMP_TOUCHPAD_H
 #define RECOMP_TOUCHPAD_H

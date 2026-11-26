@@ -171,3 +171,27 @@ left corner, beside the shoulder pill (the side flips with the
 left-handed layout's), as a small, dim eye -- open while the controls
 show, slashed when they don't -- half the size, most of the showiness
 gone: "small opaque eye".
+
+### Step 24 — both sticks dynamic; a tap is always the game's
+
+The phone's own control design, replacing the hybrid the pad began
+with (a fixed left circle to find, a corner zone that claimed whole
+regions of the right):
+
+- **Both sticks are dynamic.** Neither claims a finger as it lands
+  (tp_hit answers buttons only now). Touch and hold (~a sixth of a
+  second) or drag (past ~12 points) in the lower-left pocket and the
+  movement stick spawns under the thumb, base where it landed, knob
+  following; the right pocket the second stick, and only where the
+  pack keeps one. The left-handed layout flips the pockets.
+- **A tap is always the game's.** A landing finger in a pocket is the
+  game's touch first; when it becomes a stick, that brief touch ends
+  with the panel's own release path -- the game saw a tap, as on the
+  Vita, never a stolen swipe.
+- The fixed left-stick circle is gone from the picture: like the
+  right's, it is nothing until a thumb is on it (pad_draw), and the
+  first-run strip and the Controls page teach "hold or drag".
+
+Thresholds chosen with Uncharted in mind: its camera swipes and
+charcoal rubs begin mid-screen, outside both pockets, and its quick
+taps -- wherever they land -- always reach the game.

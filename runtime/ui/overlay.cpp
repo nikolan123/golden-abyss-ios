@@ -560,9 +560,9 @@ static void page_controls(void) {
 	section_label("Input");
 	if (ui::rows_begin("input")) {
 		if (phone_ui()) {
-			ui::row("On-screen pad", "The sticks, buttons and shoulders drawn over the picture. Off: the screen is only the Vita's touch panel.");
+			ui::row("On-screen pad", "The buttons and shoulders as drawn. The movement stick spawns wherever a thumb holds or drags in the lower left, never stealing a tap: a quick touch there is the game's own, as on the Vita. Off: the screen is only the touch panel.");
 			{ bool on = touchpad_on(); if (ui::toggle("tp_on", &on)) touchpad_set_on(on); }
-			ui::row("Second stick", "A floating right stick where a thumb lands in the lower right corner. Off: every touch there goes to the game instead (a game that aims by swiping the picture wants it off).");
+			ui::row("Second stick", "A floating second stick that spawns in the lower right, where a thumb holds or drags. Off: the lower right is only the game's (a game that aims by swiping the picture wants it off).");
 			{ bool rs = window_touchpad_rstick() != 0; if (ui::toggle("tp_rs", &rs)) { settings_set_int("touchpad_rstick", rs ? 1 : 0); settings_save(); } }
 			ui::row("Pad size");
 			{ int v = touchpad_scale(); ImGui::SetNextItemWidth(-FLT_MIN);
@@ -1472,12 +1472,14 @@ static void pad_draw(void) {
 	const ImU32 text = IM_COL32(235, 240, 255, (int)(255 * a * 0.9f));
 	const ImU32 hot  = IM_COL32(255, 255, 255, (int)(255 * a));
 
-	/* the left stick: base ring, knob */
-	dl->AddCircleFilled(ImVec2(tv->sl_x, tv->sl_y), tv->sl_r, IM_COL32(10, 12, 16, (int)(255 * a * 0.30f)), 48);
-	dl->AddCircle(ImVec2(tv->sl_x, tv->sl_y), tv->sl_r, ring, 48, 1.5f);
-	const float kx = tv->sl_active ? tv->sl_kx : tv->sl_x, ky = tv->sl_active ? tv->sl_ky : tv->sl_y;
-	dl->AddCircleFilled(ImVec2(kx, ky), tv->sl_r * 0.42f, IM_COL32(235, 240, 255, (int)(255 * a * 0.22f)), 32);
-	dl->AddCircle(ImVec2(kx, ky), tv->sl_r * 0.42f, hot, 32, 1.5f);
+	/* the left stick: dynamic now, like the right -- it spawns where a thumb held or dragged in its
+	 * pocket (window.c's tp_zone_hold), and is nothing until then; a tap in the pocket is a tap. */
+	if (tv->sl_active) {
+		dl->AddCircleFilled(ImVec2(tv->sl_x, tv->sl_y), tv->sl_r, IM_COL32(10, 12, 16, (int)(255 * a * 0.30f)), 48);
+		dl->AddCircle(ImVec2(tv->sl_x, tv->sl_y), tv->sl_r, ring, 48, 1.5f);
+		dl->AddCircleFilled(ImVec2(tv->sl_kx, tv->sl_ky), tv->sl_r * 0.42f, IM_COL32(235, 240, 255, (int)(255 * a * 0.22f)), 32);
+		dl->AddCircle(ImVec2(tv->sl_kx, tv->sl_ky), tv->sl_r * 0.42f, hot, 32, 1.5f);
+	}
 
 	/* the right stick, only while a thumb is on it: where it landed, nothing when idle */
 	if (tv->sr_active) {
@@ -1855,7 +1857,7 @@ static void build_intro_hint(void) {
 	                                       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs);
 	if (g_intro_done < 0) {
 		ui::heading("Playing on this phone", em * 1.05f);
-		ui::muted_wrapped("The sticks, buttons and shoulders are at the edges. The picture itself is the Vita's touch screen: tap and drag it.");
+		ui::muted_wrapped("Buttons and shoulders at the edges. Hold or drag the lower left and the movement stick spawns under your thumb there; a quick tap anywhere always touches the game's screen.");
 		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("Pull down from the top for the menu. The little eye at the top left turns these controls off and on."); ImGui::PopStyleColor();
 	} else {
 		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("That's it -- back to the game."); ImGui::PopStyleColor();

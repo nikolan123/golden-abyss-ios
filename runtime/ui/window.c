@@ -1056,24 +1056,73 @@ static void tp_layout(float w, float h) {
 		        w, h, st, sb, sl, sr, tv.sl_x, tv.sl_y, tv.sl_r, rx, cy, rb, gap, mt + sh / 2, sh, mt + ph / 2);
 }
 
-/* which control is at (x,y): a button index + 10, 1 the left stick, 2 the right stick's zone, 0 nothing */
+/* which control is at (x,y): a button index + 10, or 0. The sticks no longer claim a landing
+ * finger -- they spawn under a thumb that *holds or drags* (tp_zone_hold, below): a tap always
+ * touches the game's screen, wherever it lands. */
 static int tp_hit(float x, float y) {
 	for (int i = 0; i < tv.nb; i++) {
 		const TpButton *b = &tv.b[i];
 		if (b->pill) { if (fabsf(x - b->x) <= b->hw && fabsf(y - b->y) <= b->hh) return 10 + i; }
 		else if (hypotf(x - b->x, y - b->y) <= b->r * 1.18f) return 10 + i;
 	}
-	if (hypotf(x - tv.sl_x, y - tv.sl_y) <= tv.sl_r * 1.55f) return 1;
-	/* the floating right stick, when the player keeps it: the lower-right *corner* (where an aiming
-	 * thumb lands). A pack can take a side (RECOMP_TOUCHPAD_RSTICK in its RUN_ENV): one whose camera
-	 * is touch swipes and whose actions live along the right edge -- this one -- has nothing for a
-	 * floating stick there but its own icons to steal; the menu's toggle is the player's, and a
-	 * setting always wins over the pack's choice. Off: the corner's touches all go to the game. */
-	if (window_touchpad_rstick() && y > tv.h * 0.55f) {
-		const int right_corner = tv.mirror ? (x < tv.w * 0.40f) : (x > tv.w * 0.60f);
-		if (right_corner) return 2;
-	}
 	return 0;
+}
+
+/* ---- the pockets: where a thumb that holds or drags becomes a stick -------------------------------------
+ * The phone's own design, replacing the fixed left stick and the claimed corner zone: *both* sticks are
+ * dynamic now, and neither steals a finger at the moment it lands. A landing finger in a pocket is the
+ * game's touch first -- a quick tap is a tap, exactly as on the Vita; the moment it *moves* (past a
+ * 12-point threshold) or *rests* (a sixth of a second), it becomes its pocket's stick, the base where
+ * the thumb landed and a clean release of the brief game touch it began as. The movement stick's
+ * pocket is the lower left (the left-handed layout flips it); the second stick's is the lower right,
+ * and only where the pack allows one at all (RECOMP_TOUCHPAD_RSTICK, the menu's toggle over it). */
+static struct { SDL_FingerID id; float x, y; double at; int zone; } zwait[10];   /* a landing finger in a pocket, waiting to be a tap or a stick */
+static void tp_apply_stick(int which, float x, float y, float bx, float by, float reach, uint8_t *ox, uint8_t *oy);
+static int tp_zone_of(float x, float y) {
+	if (!tv.on || !tv.w || y < tv.h * 0.50f) return 0;
+	if (tv.mirror ? (x > tv.w * 0.58f) : (x < tv.w * 0.42f)) return 1;   /* the movement stick's pocket */
+	if (window_touchpad_rstick() && (tv.mirror ? (x < tv.w * 0.42f) : (x > tv.w * 0.58f))) return 2;   /* the second stick's, where the pack keeps one */
+	return 0;
+}
+static double tp_now(void) { return (double)(SDL_GetTicks() - 1) / 1000.0; }   /* (0 never happened: a finger landed at 0 once) */
+static int tp_zone_hold(const SDL_Event *e) {
+	const float x = e->tfinger.x * tv.w, y = e->tfinger.y * tv.h;
+	int k = -1;
+	for (int i = 0; i < 10; i++) if (zwait[i].id == e->tfinger.fingerID) { k = i; break; }
+	if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) {   /* lifted before it was either: it was the game's tap */
+		if (k >= 0) { zwait[k].id = 0; zwait[k].zone = 0; }
+		return 0;
+	}
+	if (e->type == SDL_EVENT_FINGER_DOWN) {   /* remember where it landed, if that was in a pocket */
+		const int zone = tp_zone_of(x, y);
+		if (zone) for (int i = 0; i < 10; i++) if (!zwait[i].id) { zwait[i].id = e->tfinger.fingerID; zwait[i].x = x; zwait[i].y = y; zwait[i].at = tp_now(); zwait[i].zone = zone; break; }
+		return 0;
+	}
+	if (e->type != SDL_EVENT_FINGER_MOTION || k < 0) return 0;
+	const double now = tp_now();
+	if (hypotf(x - zwait[k].x, y - zwait[k].y) < 12.0f && now - zwait[k].at < 0.16) return 0;   /* still maybe a tap */
+	const int zone = zwait[k].zone;
+	if ((zone == 1 && tv.sl_active) || (zone == 2 && tv.sr_active)) { zwait[k].id = 0; zwait[k].zone = 0; return 0; }   /* that stick has its thumb already; this finger stays the game's */
+	int slot = -1;
+	for (int i = 0; i < 10; i++) if (!tpf[i].id) { slot = i; break; }
+	if (slot < 0) { zwait[k].id = 0; zwait[k].zone = 0; return 0; }
+	/* the brief game touch it began as ends cleanly, exactly as a lift: the panel's own release path */
+	for (int i = 0; i < ST_FINGERS; i++) if (st_down[i] && st_id[i] == e->tfinger.fingerID) { hold_release(&hold_st[i]); st_down[i] = 0; }
+	tpf[slot].id = e->tfinger.fingerID; tpf[slot].which = zone; tpf[slot].bx = zwait[k].x; tpf[slot].by = zwait[k].y;
+	if (zone == 1) {
+		tv.sl_active = 1; tv.sl_x = tpf[slot].bx; tv.sl_y = tpf[slot].by; tv.sl_kx = x; tv.sl_ky = y;
+		tp_apply_stick(1, x, y, tpf[slot].bx, tpf[slot].by, tv.sl_r, &tp_stick[0], &tp_stick[1]);
+	} else {
+		float bx = tpf[slot].bx, by = tpf[slot].by;
+		if (bx < tv.sr_r) bx = tv.sr_r;
+		if (bx > tv.w - tv.sr_r) bx = tv.w - tv.sr_r;
+		if (by > tv.h - tv.sr_r) by = tv.h - tv.sr_r;
+		tv.sr_active = 1; tv.sr_x = bx; tv.sr_y = by; tv.sr_kx = x; tv.sr_ky = y;
+		tp_apply_stick(2, x, y, bx, by, tv.sr_r, &tp_stick[2], &tp_stick[3]);
+	}
+	if (pad_dbg()) fprintf(stderr, "    finger %u: it held or dragged in pocket %d -- its stick spawned at (%.0f, %.0f), the game's brief tap ended\n", (unsigned)e->tfinger.fingerID, zone, tpf[slot].bx, tpf[slot].by);
+	zwait[k].id = 0; zwait[k].zone = 0;
+	return 1;
 }
 
 static void tp_apply_stick(int which, float x, float y, float bx, float by, float reach, uint8_t *ox, uint8_t *oy) {
@@ -1435,7 +1484,9 @@ void window_run(void *(*fn)(void *), void *arg) {
 					if (overlay_owns_point(fx, fy)) {
 						if (pad_dbg()) fprintf(stderr, "    finger %u down at (%.0f, %.0f): the overlay's own tap (the bar, one of its menus, the pull tab or a dialog) -- the game sees nothing\n", (unsigned)e.tfinger.fingerID, fx, fy);
 						continue; } }
-				if (touchpad_event(&e)) continue; screen_finger(&e); continue; }
+				if (touchpad_event(&e)) continue;
+				if (tp_zone_hold(&e)) continue;   /* a hold or a drag in a pocket became its stick; the brief tap before it was the game's */
+				screen_finger(&e); continue; }
 			if ((e.type == SDL_EVENT_MOUSE_MOTION && e.motion.which == SDL_TOUCH_MOUSEID) || ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.which == SDL_TOUCH_MOUSEID)) continue;
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F12) { extern void gfxcap_request(void); gfxcap_request(); fprintf(stderr, "capture requested (F12)\n"); }
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F1) metrics_osd_cycle();
