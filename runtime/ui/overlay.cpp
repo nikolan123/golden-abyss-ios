@@ -1049,19 +1049,19 @@ static void build_tab(float w, double t) {
 	ImGui::End();
 	ImGui::PopStyleVar(3);
 }
-/* the controls chip: a small, dim eye -- the phone's own request -- tucked into the top-left
- * corner, beside the shoulder pill, out of every game's way (the top centre belongs to the pull
- * tab and the game's banners; the right edge to the icon bar). Always drawn, even with the pad
- * off -- that being its point: a tap flips the pad live, the eye is open while they show and
- * slashed when they don't. Its tap is ImGui's (the chip's native twin was the double toggle of
- * Step 22's first try); while the bar is down it makes way, the bar's Controls menu holds the
- * same switch among all the others. */
+/* the controls chip: a small, dim eye -- the phone's own request -- in the top-left corner's very
+ * slot ("always at that leftmost spot": the shoulder pill stands off the corner to its right,
+ * window.c's tp_layout keeping the gap, the position derived from the pill's own edge so the two
+ * can never drift apart). Always drawn, even with the pad off -- that being its point: a tap flips
+ * the pad live, the eye open while the controls show and slashed when they don't. Its tap is
+ * ImGui's (the chip's native twin was the double toggle of Step 22's first try); while the bar is
+ * down it makes way, the bar's Controls menu holds the same switch among all the others. */
 static void build_pad_toggle(float w) {
 	(void)w;
 	if (!phone_ui()) return;
 	const TpVisual *tv = touchpad_visuals();
-	const float pill = tv && tv->nb >= 6 ? (tv->mirror ? tv->b[5].x + tv->b[5].hw : tv->b[4].x + tv->b[4].hw) : 0.0f;   /* the top strip's leftmost pill, whichever side L is on */
-	const float cw = 40, ch = 22, x0 = pill + 8, y0 = 1;
+	const float pill = tv && tv->nb >= 6 ? (tv->mirror ? tv->b[5].x - tv->b[5].hw : tv->b[4].x - tv->b[4].hw) : 0.0f;   /* the top strip's leftmost pill's left edge (window.c stands it off the corner for this) */
+	const float cw = 40, ch = 22, x0 = pill - 54.0f, y0 = 1;   /* its corner slot: 46 wide plus the 8-point gap the pill keeps */
 	ImGui::SetNextWindowPos(ImVec2(x0, y0));
 	ImGui::SetNextWindowSize(ImVec2(cw, ch));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0, 0));

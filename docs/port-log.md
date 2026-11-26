@@ -195,3 +195,12 @@ regions of the right):
 Thresholds chosen with Uncharted in mind: its camera swipes and
 charcoal rubs begin mid-screen, outside both pockets, and its quick
 taps -- wherever they land -- always reach the game.
+
+### Step 25 — the eye owns the corner
+
+The phone's placement, final: the eye always sits at the top-left
+corner's very slot, and whichever shoulder pill is physically left
+stands off 54 points to its right. The pill's own left edge is what
+the eye draws its slot from (and window.c's layout shifts the pill
+for), so the two cannot drift. Left-handed flips the pills, never the
+eye.

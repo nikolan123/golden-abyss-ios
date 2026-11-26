@@ -1042,6 +1042,12 @@ static void tp_layout(float w, float h) {
 	/* the shoulders: pills along the top, full width enough to hit with an index finger */
 	const float sw = w * 0.13f, sh = h * 0.075f;
 	float ll = tv.mirror ? w - mr - sw : ml, rl2 = tv.mirror ? ml : w - mr - sw;
+	{	/* whichever pill sits at the physical left stands off the corner: the controls eye lives
+		 * there (the phone's own placement -- "always at that leftmost spot"), its 46-point slot
+		 * and the gap; the eye draws into it from the pill's own left edge (overlay.cpp), so the
+		 * two can never disagree */
+		const float off = 46.0f + 8.0f;
+		if (tv.mirror) rl2 = ml + off; else ll = ml + off; }
 	b[4] = (TpButton){ ll + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, LTRIG, TP_LABEL_L, 0 };
 	b[5] = (TpButton){ rl2 + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, RTRIG, TP_LABEL_R, 0 };
 	/* start and select, a touch bigger than before (start pauses, in every game), between the shoulders */
