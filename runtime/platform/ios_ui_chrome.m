@@ -104,7 +104,7 @@ static void eye_look(void) {
 		const CGPoint wp = [self convertPoint:p toView:nil];
 		if (overlay_owns_point(wp.x, wp.y)) return NO;
 	}
-	if (pill) return YES;   /* the frame is the pill's own box */
+	if (pill) return CGRectContainsPoint(self.bounds, p);   /* UIKit asks this one question and trusts it: a YES outside the bounds is a YES for the whole window -- test17's whole-glass swallow */
 	const float cxr = self.bounds.size.width * 0.5f, cyr = self.bounds.size.height * 0.5f;
 	return hypotf(p.x - cxr, p.y - cyr) <= cxr;   /* the 1.18-radius circle, in the box the frame is */
 }

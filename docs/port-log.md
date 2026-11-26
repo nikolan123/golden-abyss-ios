@@ -302,3 +302,26 @@ to tell the story itself:
   pad_on, not the chrome's blanket word), so ImGui's pad and the
   finger path own the glass again. RECOMP_NATIVE_CHROME=0 still
   takes the eye, the pull and the toasts with it.
+
+### Step 29 — the whole-glass swallow: pointInside was the whole hit test
+
+test18's log named it in one read: every touch, anywhere on the
+screen, was delivered to button 7 -- points like (533, 353) landing
+on a view whose logged frame is (369, 11, 61 x 25) -- and SDL saw
+exactly one finger the whole session (one pull, before the pad's
+views even existed). Root cause: UIKit asks `pointInside:` as *the
+entire* hit test -- it does not pre-check the frame on its own --
+and the pill branch answered YES unconditionally, so the last-added
+pill (the window's reverse hit-test walk finds it first) swallowed
+every touch on the glass: the haptic on every tap, the game's own
+touch panel dead, the intro card open and undismissable (all its
+taps eaten too, which is why "hidden bits 2" stayed on to the end).
+
+The fix is the one honest line: `CGRectContainsPoint(self.bounds, p)`
+-- a pill takes its own box and nothing else. The circle buttons
+already had the bounds-relative math; only the pills lied.
+
+The finger-routing debug stays in the pack this one round: its
+presence is the proof -- test18's log never once said "the game's
+touch panel", and test19's must say it everywhere the controls
+aren't.
