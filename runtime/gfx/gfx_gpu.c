@@ -370,12 +370,13 @@ void *gfx_gpu_create_device(void) {
 	SDL_GPUDevice *d = 0;
 #ifdef __APPLE__
 #include <TargetConditionals.h>
-    /* Apply the saved opt-in before SDL creates Metal's device/layer. An explicit
-     * RECOMP_METAL_HUD override wins; otherwise preserve an externally supplied HUD
-     * environment when no preference has ever been saved. */
+    /* Apply the saved choice before SDL creates Metal's device/layer. An explicit
+     * RECOMP_METAL_HUD override wins; a saved preference applies as saved; with neither,
+     * the HUD is on by default (an externally supplied HUD environment is respected). */
     { const char *e = getenv("RECOMP_METAL_HUD");
       if (e && *e) setenv("MTL_HUD_ENABLED", atoi(e) ? "1" : "0", 1);
-      else if (settings_has("metal_hud")) setenv("MTL_HUD_ENABLED", settings_int("metal_hud", 0) ? "1" : "0", 1); }
+      else if (settings_has("metal_hud")) setenv("MTL_HUD_ENABLED", settings_int("metal_hud", 1) ? "1" : "0", 1);
+      else if (!getenv("MTL_HUD_ENABLED")) setenv("MTL_HUD_ENABLED", "1", 1); }
 
 #endif
 #ifndef __APPLE__   /* (on Apple, Metal: SDL could otherwise find MoltenVK) */

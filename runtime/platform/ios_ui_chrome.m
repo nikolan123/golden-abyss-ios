@@ -569,9 +569,9 @@ static CGFloat panel_rows(int tab) {
 			}
 		}
         b = panel_button(CGRectMake(0, y, vb.size.width, row), @"Metal HUD (restart)");
-        if (settings_int("metal_hud", 0)) panel_dot(CGRectMake(vb.size.width - 20, y + row * 0.5f - 3, 6, 6));
+        if (settings_int("metal_hud", 1)) panel_dot(CGRectMake(vb.size.width - 20, y + row * 0.5f - 3, 6, 6));
         panel_fire_on_highlight(b, ^{
-            settings_set_int("metal_hud", !settings_int("metal_hud", 0)); settings_save();
+            settings_set_int("metal_hud", !settings_int("metal_hud", 1)); settings_save();
             overlay_toast_titled("Metal HUD", "Restart the app to apply this change.", 3);
             bar_panel_rebuild();
         }); y += row;
@@ -1056,7 +1056,7 @@ static void cfg_page_performance(void) {
 		r->detail = @"Frame rate and timings drawn over the game";
 	}
     {
-        CfgRow *r = cfg_switch("Metal HUD", settings_int("metal_hud", 0), ^(int on) {
+        CfgRow *r = cfg_switch("Metal HUD", settings_int("metal_hud", 1), ^(int on) {
             settings_set_int("metal_hud", on); settings_save();
             overlay_toast_titled("Metal HUD", "Restart the app to apply this change.", 3);
         });

@@ -480,7 +480,7 @@ static void page_performance(void) {	if (!ui::rows_begin("perf")) return;
 	  ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f); ImGui::TextUnformatted(b); ImGui::PopFont(); }
 	if (metal_hud_row()) {
 		ui::row("Metal HUD", "Apple's own overlay, drawn by Metal over the game: frame rate, GPU time, memory. Applies the next time the game starts (Metal reads it when it makes the device).");
-		{ bool on = settings_int("metal_hud", 0) != 0; if (ui::toggle("mhud", &on)) { settings_set_int("metal_hud", on ? 1 : 0); settings_save(); } }
+		{ bool on = settings_int("metal_hud", 1) != 0; if (ui::toggle("mhud", &on)) { settings_set_int("metal_hud", on ? 1 : 0); settings_save(); } }
 	}
 	ui::rows_end();
 }
@@ -960,7 +960,7 @@ static void menu_view(void) {
 			ImGui::Unindent(); }
 		if (metal_hud_row()) {   /* saved Metal overlay preference; applied after restart */
 			ImGui::Separator();
-			bool mh = settings_int("metal_hud", 0) != 0;
+			bool mh = settings_int("metal_hud", 1) != 0;
 			if (ImGui::MenuItem("Metal HUD", nullptr, &mh)) { settings_set_int("metal_hud", mh ? 1 : 0); settings_save(); }
 			ImGui::PushStyleColor(ImGuiCol_Text, ui::muted); ImGui::TextUnformatted("Frame rate, GPU and memory over the game.\nTakes effect at the next launch."); ImGui::PopStyleColor();
 		}

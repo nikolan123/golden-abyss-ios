@@ -662,3 +662,18 @@ lifecycle, touch-input and viewport tests passed, as did the 184-check system
 dialog suite, iOS build, native Clang analysis and packaged IPA validation.
 See `docs/ios-ui-test37-native.md` for details, artifact identity and the
 remaining physical-device checks.
+
+### Step 47 — the 2x measurement build, Metal HUD on by default
+
+- The Metal HUD is on by default now: a fresh install shows Apple's
+  own overlay unless a player turns it off (a saved choice always
+  wins, and RECOMP_METAL_HUD still overrides everything; an
+  externally supplied MTL_HUD_ENABLED is respected).
+- This pack is the 2x-upscaling measurement round: RECOMP_GPU_FENCE_
+  STATS=1 (a one-per-second GPU-busy summary in the session log:
+  ms/frame busy, present latency, frames in flight) and
+  RECOMP_FSR_RENDER=1 (FSR, when the Display page's anti-aliasing
+  picks FSR 3.1, renders at 1x and upscales to the chosen
+  resolution -- the sharp-at-less-cost candidate to measure
+  against plain 2x). Both leave with the measurement; the fence
+  stats are the "where does 15 fps go" question answered.
