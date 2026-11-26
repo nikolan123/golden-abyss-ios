@@ -382,3 +382,22 @@ The amber square moved into the painted image (still
 RECOMP_PAD_CANVAS_DEBUG=0 to take it off), the counter keeps its
 name -- `drew N` in the once-a-second line is paints now -- and the
 first paint of the session says its size and scale.
+
+### Step 33 — back to the window: the root view was never the tree the glass talks to
+
+test22's log made two eras legible: from Step 30 on (the chrome inside
+`rootViewController.view`) not one button touch and not one pull
+arrived -- yet test19's window-hosted views took touches
+dead-precisely (btn 2 at (834, 359) inside (805, 358, 56 x 56)).
+Whatever that root-view object is at install time (one subview, the
+metal view, by every appearance live), it is not part of the tree
+iOS delivers to -- the window is. So the chrome returns to the
+window, and the drawing question that first sent it hunting for a
+new home is already answered by Step 32's canvas: no drawRect
+anywhere in the path, the picture painted into an image and a plain
+UIImageView carrying it, state-changes only.
+
+Window-hosted + image-carried is the combination never tried
+before: test19 had the window but a drawRect that never ran; test22
+had the image but a host that took no touches. This is both halves
+of the answer in one build.

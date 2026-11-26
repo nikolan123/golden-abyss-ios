@@ -487,18 +487,19 @@ void ios_ui_chrome_install(void) {
 	UIWindow *win = chrome_window();
 	if (!win) { chrome_log("    chrome: no window to install into (the ImGui chrome keeps the phone)"); return;   /* nothing to hang from yet */ }
 	g_win = win;
-	{	/* where the chrome lives: inside SDL's own root view (the view its Metal content lives in --
-	 * a sibling added after the game, so above it in both compositing and hit-testing). The window
-	 * itself also carries the pull recognizer: it sees every touch without being anyone's target. */
-		g_host = win.rootViewController.view;
-		if (!g_host) g_host = win;
+	{	/* where the chrome lives: on the window itself, beside the game's root view. Step 30 tried the
+	 * root view controller's view (the one SDL's Metal content sits in) -- and it went dark: not one
+	 * touch, not one paint, all session, while the very same views on the window had taken touches
+	 * dead-precisely in test19 (Step 31's numbers, then nothing from Step 30 on). Whatever that
+	 * view is at install time, it is not the tree the glass talks to; the window is. */
+		g_host = win;
 	}
 	{
 		const char *np = getenv("RECOMP_NATIVE_PAD");   /* =0: the native pad never comes up (the ImGui pad and the finger path again) */
 		g_pad_disabled = np && np[0] == '0' && np[1] == '\0';
 	}
-	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p (%s), %d subviews; pad %s)", win, win.bounds.size.width, win.bounds.size.height,
-	           g_host, g_host == win ? "the window itself" : "the root view", (int)g_host.subviews.count, g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
+	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p (%s); pad %s)", win, win.bounds.size.width, win.bounds.size.height,
+	           g_host, g_host == win ? "the window" : "the root view", g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
 
 	g_center = [[ChromeCenter alloc] init];   /* kept: UIKit's targets and delegates don't retain */
 	g_eye = [[UIButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
