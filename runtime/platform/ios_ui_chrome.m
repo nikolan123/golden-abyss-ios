@@ -160,63 +160,31 @@ static void pad_glyph_cg(CGContextRef c, int label, float cx, float cy, float r,
 	CGContextSetLineWidth(c, t);
 }
 
-/* the pad's picture: everything tp_layout laid out, drawn once per dirty rect the display link asks
- * for (a button's box while it can change, a wider box around a live stick so the knob can slide) */
-@interface PadLayer : UIView {
- @public
-	BOOL sl_was, sr_was;   /* a stick that just ended paints its own last box once, and its clearing */
-}
-@end
-
-@implementation PadLayer
-- (instancetype)initWithFrame:(CGRect)f {
-	if ((self = [super initWithFrame:f])) { sl_was = sr_was = NO; }
-	return self;
-}
-- (void)sync {
-	const TpVisual *tv = touchpad_visuals();
-	if (!tv->on || !tv->nb) return;
-	for (int i = 0; i < tv->nb; i++) {   /* the buttons: their boxes, a little grown, held dirty while the pad is on */
-		const TpButton *b = &tv->b[i];
-		if (b->pill) [self setNeedsDisplayInRect:CGRectMake(b->x - b->hw - 4.0f, b->y - b->hh - 4.0f, 2 * b->hw + 8.0f, 2 * b->hh + 8.0f)];
-		else { const float e = b->r * 1.18f;
-			[self setNeedsDisplayInRect:CGRectMake(b->x - e - 4.0f, b->y - e - 4.0f, 2 * e + 8.0f, 2 * e + 8.0f)]; }
-	}
-	const float pr = tv->sl_r * 1.45f + 4.0f;   /* a live stick's box: base and knob, wherever it slides */
-	if (tv->sl_active) { [self setNeedsDisplayInRect:CGRectMake(tv->sl_x - pr, tv->sl_y - pr, 2 * pr, 2 * pr)]; self->sl_was = YES; }
-	if (tv->sr_active) { const float qr = tv->sr_r * 1.45f + 4.0f; [self setNeedsDisplayInRect:CGRectMake(tv->sr_x - qr, tv->sr_y - qr, 2 * qr, 2 * qr)]; self->sr_was = YES; }
-}
-- (void)drawRect:(CGRect)rect {
-	(void)rect;
-	const TpVisual *tv = touchpad_visuals();
-	if (!tv->on) return;
-	{
-		g_pad_draws++;
-		static int said;
-		if (!said) { said = 1; chrome_log("    chrome: canvas drew (bounds %.0fx%.0f, opacity %.2f)", self.bounds.size.width, self.bounds.size.height, tv->opacity / 100.0f); }
-	}
-	CGContextRef c = UIGraphicsGetCurrentContext();
+/* the pad's picture, as one painter's function: everything tp_layout laid out, the very shapes and
+ * weights the ImGui card drew. The canvas question of Step 30 (drawRect never ran once, however
+ * many rects were marked) is answered by not asking it anything: this paints into an offscreen
+ * image whenever the pad's state actually changed, and a plain UIImageView carries the pixels --
+ * the same delivery as every other UIKit control on the screen, no drawRect in the path at all. */
+static void pad_paint_cg(CGContextRef c, const TpVisual *tv, CGSize size) {
 	{	/* RECOMP_PAD_CANVAS_DEBUG (default this round; =0 takes it off): an amber square under the
-	 * top bar's centre, pure UIKit, none of the pad's state -- seeing it says the canvas composites;
-	 * not seeing it says compositing, before anything about shapes or paths */
+	 * top bar's centre, pure UIKit, none of the pad's state -- seeing it says the image rides */
 		static int want = -1;
 		if (want < 0) { const char *e = getenv("RECOMP_PAD_CANVAS_DEBUG"); want = !(e && e[0] == '0' && e[1] == '\0'); }
 		if (want) {
 			CGContextSetFillColorWithColor(c, [UIColor colorWithRed:1.0f green:0.73f blue:0.28f alpha:0.85f].CGColor);
-			CGContextFillRect(c, CGRectMake(self.bounds.size.width * 0.5f - 16.0f, 44.0f, 32.0f, 32.0f));
+			CGContextFillRect(c, CGRectMake(size.width * 0.5f - 16.0f, 44.0f, 32.0f, 32.0f));
 		}
 	}
-	if (!tv->nb || overlay_pad_hidden()) return;
 	const float a = (tv->opacity < 0 ? 0 : tv->opacity > 100 ? 100 : tv->opacity) / 100.0f;
 	UIColor *fill = rgba(12, 14, 18, 0.55f * a), *ring = rgba(235, 240, 255, 0.75f * a);
 	UIColor *text = rgba(235, 240, 255, 0.90f * a), *hot = rgba(255, 255, 255, a);
 	UIColor *base = rgba(10, 12, 16, 0.30f * a), *knob_fill = rgba(235, 240, 255, 0.22f * a);
 
-	if (tv->sl_active || self->sl_was || tv->sr_active || self->sr_was) {   /* the sticks, only while a thumb is on one */
+	const int hidden = overlay_pad_hidden() != 0;
+	if (!hidden && (tv->sl_active || tv->sr_active)) {   /* the sticks, only while a thumb is on one */
 		CGContextSetLineWidth(c, 1.5f);
-		CGContextSetStrokeColorWithColor(c, ring.CGColor);
 		if (tv->sl_active) {
-			CGContextSetFillColorWithColor(c, base.CGColor);
+			CGContextSetFillColorWithColor(c, base.CGColor); CGContextSetStrokeColorWithColor(c, ring.CGColor);
 			CGContextFillEllipseInRect(c, CGRectMake(tv->sl_x - tv->sl_r, tv->sl_y - tv->sl_r, 2 * tv->sl_r, 2 * tv->sl_r));
 			CGContextStrokeEllipseInRect(c, CGRectMake(tv->sl_x - tv->sl_r, tv->sl_y - tv->sl_r, 2 * tv->sl_r, 2 * tv->sl_r));
 			const float kr = tv->sl_r * 0.42f;
@@ -233,10 +201,8 @@ static void pad_glyph_cg(CGContextRef c, int label, float cx, float cy, float r,
 			CGContextFillEllipseInRect(c, CGRectMake(tv->sr_kx - kr, tv->sr_ky - kr, 2 * kr, 2 * kr));
 			CGContextStrokeEllipseInRect(c, CGRectMake(tv->sr_kx - kr, tv->sr_ky - kr, 2 * kr, 2 * kr));
 		}
-		self->sl_was = tv->sl_active;
-		self->sr_was = tv->sr_active;
 	}
-
+	if (hidden) return;
 	for (int i = 0; i < tv->nb; i++) {   /* the buttons: the same fill, ring and glyph, down lighting the pressed one */
 		const TpButton *b = &tv->b[i];
 		UIColor *cf = b->down ? rgba(255, 255, 255, 0.30f * a) : fill;
@@ -262,6 +228,57 @@ static void pad_glyph_cg(CGContextRef c, int label, float cx, float cy, float r,
 			pad_glyph_cg(c, b->label, b->x, b->y, b->r * 1.55f, ct);
 		}
 	}
+}
+
+/* what the picture must repaint for: every number of the layout and state a pixel depends on */
+struct PadSig {
+	int nb, opacity, hidden, down[8];
+	int sl_a; float sl_x, sl_y, sl_kx, sl_ky, sl_r;
+	int sr_a; float sr_x, sr_y, sr_kx, sr_ky, sr_r;
+	float w, h;
+};
+
+@interface PadLayer : UIView {
+ @public
+	UIImageView *imgv;      /* the picture's carrier: a plain image view, no drawRect anywhere */
+	struct PadSig sig;      /* what was painted last: equal means nothing to do */
+	BOOL made;
+}
+@end
+
+@implementation PadLayer
+- (void)sync {
+	const TpVisual *tv = touchpad_visuals();
+	if (!tv->on || !tv->nb || !self.window) return;
+	if (!made) {   /* the carrier itself: full-size, locked to our bounds, never a touch */
+		imgv = [[UIImageView alloc] initWithFrame:self.bounds];
+		imgv.userInteractionEnabled = NO;
+		imgv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		[self addSubview:imgv];
+		[imgv release];
+		made = YES;
+		chrome_log("    chrome: canvas made (%.0fx%.0f in the root view, scale %.1fx)", self.bounds.size.width, self.bounds.size.height, self.window.screen.scale);
+	}
+	struct PadSig s;
+	memset(&s, 0, sizeof s);
+	s.nb = tv->nb; s.opacity = tv->opacity; s.hidden = overlay_pad_hidden();
+	s.w = self.bounds.size.width; s.h = self.bounds.size.height;
+	for (int i = 0; i < tv->nb && i < 8; i++) s.down[i] = tv->b[i].down;
+	s.sl_a = tv->sl_active; s.sl_x = tv->sl_x; s.sl_y = tv->sl_y; s.sl_kx = tv->sl_kx; s.sl_ky = tv->sl_ky; s.sl_r = tv->sl_r;
+	s.sr_a = tv->sr_active; s.sr_x = tv->sr_x; s.sr_y = tv->sr_y; s.sr_kx = tv->sr_kx; s.sr_ky = tv->sr_ky; s.sr_r = tv->sr_r;
+	if (!memcmp(&s, &sig, sizeof s)) return;   /* nothing the least pixel depends on has changed */
+	sig = s;
+	const CGSize sz = self.bounds.size;
+	UIGraphicsImageRendererFormat *fmt = [[UIGraphicsImageRendererFormat alloc] init];
+	const float scale = self.window.screen.scale > 0 ? self.window.screen.scale : 3.0f;
+	fmt.scale = scale;
+	UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:sz format:fmt];
+	UIImage *im = [r imageWithActions:^(UIGraphicsImageRendererContext *rc) { pad_paint_cg(rc.CGContext, tv, sz); }];
+	[fmt release]; [r release];
+	imgv.image = im;
+	imgv.hidden = s.hidden != 0;
+	g_pad_draws++;
+	if (g_pad_draws == 1) chrome_log("    chrome: canvas painted (%.0fx%.0f, scale %.1f, opacity %.2f)", sz.width, sz.height, scale, tv->opacity / 100.0f);
 }
 @end
 

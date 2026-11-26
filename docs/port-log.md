@@ -361,3 +361,24 @@ The fix is a string literal where the class went ("the root view" /
 confirmed the real prize: the root view controller's view exists and
 is not the window, so the chrome's new home from Step 30 is exactly
 where it was meant to live.
+
+### Step 32 — the canvas stops asking drawRect for anything
+
+test21's log's one number decided it: `drew 0`, all session, with
+eight buttons laid out and nine dirty rects marked every tick --
+drawRect never ran once, so the missing buttons were never a
+compositing question; the canvas never painted a pixel for UIKit to
+composite. Rather than keep researching why a scheduled drawRect
+wouldn't fire under SDL's run of the main runloop, the canvas now
+skips that path entirely: `pad_paint_cg` (the same Core Graphics
+shapes, fills, rings and glyphs) paints into an offscreen
+UIGraphicsImageRenderer image whenever the pad's state actually
+changed (a signature of every number a pixel depends on -- nothing
+changed, nothing rendered), and a plain UIImageView carries the
+pixels. That is the same delivery as every other UIKit control on
+the screen, no drawRect in the path anywhere.
+
+The amber square moved into the painted image (still
+RECOMP_PAD_CANVAS_DEBUG=0 to take it off), the counter keeps its
+name -- `drew N` in the once-a-second line is paints now -- and the
+first paint of the session says its size and scale.
