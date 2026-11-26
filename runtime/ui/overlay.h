@@ -68,6 +68,7 @@ int overlay_game_paused(void);
  * menu and hides the bar. */
 int overlay_mouse_captured(void);
 int overlay_owns_point(float x, float y);
+int overlay_finger_nav(float x, float y);   /* (overlay.cpp: the phone's chip, pull tab and bare top edge, straight from the finger event) */
 void overlay_bar_dismiss(void);
 
 /* one-shot flags the Quit and Capture frame buttons set; window.c polls and clears them once a loop

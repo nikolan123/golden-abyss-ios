@@ -1428,8 +1428,12 @@ void window_run(void *(*fn)(void *), void *arg) {
 			 * A finger already down keeps its owner all the way: dragging off a control is still that control's. */
 			if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) {
 				if (e.type == SDL_EVENT_FINGER_DOWN) { int fw = 0, fh = 0; SDL_GetWindowSize(win, &fw, &fh);
-					if (overlay_owns_point(e.tfinger.x * (float)fw, e.tfinger.y * (float)fh)) {
-						if (pad_dbg()) fprintf(stderr, "    finger %u down at (%.0f, %.0f): the overlay's own tap (the bar, one of its menus, the pull tab or a dialog) -- the game sees nothing\n", (unsigned)e.tfinger.fingerID, e.tfinger.x * fw, e.tfinger.y * fh);
+					const float fx = e.tfinger.x * (float)fw, fy = e.tfinger.y * (float)fh;
+					if (overlay_finger_nav(fx, fy)) {   /* the phone's own gestures: the chip, the tab, a pull at the bare top edge -- natively, never through the synthesized mouse */
+						if (pad_dbg()) fprintf(stderr, "    finger %u down at (%.0f, %.0f): the overlay's own gesture (the chip, the pull tab or a pull from the top edge) -- the game sees nothing\n", (unsigned)e.tfinger.fingerID, fx, fy);
+						continue; }
+					if (overlay_owns_point(fx, fy)) {
+						if (pad_dbg()) fprintf(stderr, "    finger %u down at (%.0f, %.0f): the overlay's own tap (the bar, one of its menus, the pull tab or a dialog) -- the game sees nothing\n", (unsigned)e.tfinger.fingerID, fx, fy);
 						continue; } }
 				if (touchpad_event(&e)) continue; screen_finger(&e); continue; }
 			if ((e.type == SDL_EVENT_MOUSE_MOTION && e.motion.which == SDL_TOUCH_MOUSEID) || ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.which == SDL_TOUCH_MOUSEID)) continue;

@@ -828,6 +828,37 @@ int overlay_mouse_captured(void) { return g_ctx && g_has_window && g_mouse_captu
  * of the bar's menus is open, every tap dismisses it (a phone's "tap anywhere to close") and never
  * falls through to the game for that one closing tap. Only a *landing* finger asks: one already down
  * keeps its owner, so dragging a thumb from a control over the bar never steals it. */
+/* the phone's top strip, handled natively -- a finger event asks this directly, never through
+ * SDL's synthesized "mouse from touch" (which the plist of Step 20 turned off on some devices:
+ * every ImGui chip and pull on the glass went dead with it, "a circle that does absolutely
+ * nothing"). Three things answer: the controls chip (its tap flips the pad, live), the pull tab
+ * while it shows (its tap brings the bar), and a pull from the bare top edge -- the strip above
+ * ~9 points belongs to nobody: the shoulders begin at the margins below it. A bar menu that is
+ * open answers first (its tap closes it: overlay_owns_point's turn), and while the bar is down
+ * the bar owns its strip. */
+static float g_chip[4];   /* the chip's rect as last built (x0..y1): build_pad_toggle fills it */
+extern "C" int overlay_finger_nav(float x, float y) {
+	if (!g_ctx || !g_has_window || !phone_ui() || g_open || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) return 0;
+	ImGui::SetCurrentContext(g_ctx);
+	ImGuiIO &io = ImGui::GetIO();
+	const double t = ImGui::GetTime();
+	const bool bar_away = g_bar_vis <= 0.01f;
+	if (bar_away && g_chip[0] < g_chip[2] && x >= g_chip[0] && x <= g_chip[2] && y >= g_chip[1] && y <= g_chip[3]) {   /* the chip */
+		const bool on = touchpad_on();
+		touchpad_set_on(on ? 0 : 1);
+		overlay_toast_titled(on ? "Controls off" : "Controls on", on ? "The chip brings them back." : "", 2.4);
+		return 1;
+	}
+	if (bar_away && g_tab_a > 0.05f && y <= 20.0f && x >= io.DisplaySize.x * 0.5f - 55.0f && x <= io.DisplaySize.x * 0.5f + 55.0f) {   /* the pull tab, while it shows */
+		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
+		return 1;
+	}
+	if (bar_away && y <= 9.0f) {   /* a pull from the very top edge: the bar comes down */
+		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
+		return 1;
+	}
+	return 0;
+}
 extern "C" int overlay_owns_point(float x, float y) {
 	if (!g_ctx || !g_has_window) return 0;
 	ImGui::SetCurrentContext(g_ctx);
@@ -1048,6 +1079,7 @@ static void build_pad_toggle(float w) {
 		const bool hov = ImGui::IsItemHovered();
 		ImDrawList *dl = ImGui::GetForegroundDrawList();
 		const ImVec2 p0 = ImGui::GetItemRectMin(), p1 = ImGui::GetItemRectMax();
+		g_chip[0] = p0.x; g_chip[1] = p0.y; g_chip[2] = p1.x; g_chip[3] = p1.y;   /* (overlay_finger_nav's native tap needs the same rect) */
 		const ImU32 bg = IM_COL32(30, 30, 36, (int)((hov ? 0.90f : 0.66f) * 255));
 		dl->AddRectFilled(p0, p1, bg, ch * 0.42f, ImDrawFlags_RoundCornersBottom);
 		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, (int)(hov ? 0.28f * 255 : 0.12f * 255)), ch * 0.42f, 1.0f, ImDrawFlags_RoundCornersBottom);

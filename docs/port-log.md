@@ -126,3 +126,31 @@ test10's device round (a 15 Pro Max):
   pad off, that being its point -- a tap flips the on-screen pad live
   (the toggle obeys since Step 20), a toast says which way, a slash
   through the icon when off. The first-run strip teaches it.
+
+### Step 22 — the top strip no longer trusts a synthesized mouse
+
+test11's report finished the picture: the chip drew but a tap on it did
+nothing, and the pull tab never showed at all. The whole top strip
+hung off one fragile chain -- SDL synthesizing "mouse from touch"
+events for ImGui -- and it died with Step 20's plist key
+(UIApplicationSupportsIndirectInputEvents, added to silence SDL's own
+warning; with it, UIKit changes how the view is delivered pointer
+input, and on this device the synthesized mouse never arrived again,
+taking every ImGui tap with it: the chip, the tab, the bar's hot zone).
+
+Two changes:
+
+- **UIApplicationSupportsIndirectInputEvents removed** (SDL's
+  warning line returns; it is a warning about trackpads and pencils,
+  which this game has no use for on a phone).
+- **The chip, the pull tab and the bar's opening all answer the
+  finger event itself now** (overlay_finger_nav, straight from
+  window.c's FINGER_DOWN, before anything else claims it): the chip
+  flips the pad live, the tab (while it shows) brings the bar, and a
+  pull from the bare top edge -- the ~9 points above every control --
+  opens the bar directly. ImGui still handles the bar's own menus;
+  nothing else on the glass needs SDL's synthesized mouse.
+
+The fingers' full routing, with RECOMP_PAD_DEBUG=1 logging each: the
+overlay's own gesture (chip/tab/pull) > the overlay's own tap (bar
+and menus, dialogs) > a named pad control > the game's touch panel.
