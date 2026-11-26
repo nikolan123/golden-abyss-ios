@@ -62,6 +62,7 @@ static int fx_rebuild(SDL_GPUDevice *gpu, uint32_t sw, uint32_t sh, uint32_t dw,
         fxscaler = s;   // (the previous one leaks once per resize: app-lifetime objects, rotations are rare)
         if (fxout) { SDL_ReleaseGPUTexture(gpu, fxout); fxout = nil; }
         SDL_GPUTextureCreateInfo ci = { .type = SDL_GPU_TEXTURETYPE_2D, .width = dw, .height = dh,
+                                        .layer_count_or_depth = 1, .num_levels = 1, .sample_count = SDL_GPU_SAMPLECOUNT_1,
                                         .format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,
                                         .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE };
         fxout = SDL_CreateGPUTexture(gpu, &ci);
