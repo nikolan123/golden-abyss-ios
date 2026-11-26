@@ -544,3 +544,17 @@ Three from the phone's report, all clean:
 - Still ImGui on a phone: the save-data dialogs, the message/IME
   dialogs, and the rare prep/layout/quit cards -- game- or
   host-driven popups, the next round's work if wanted.
+
+### Step 40 — the crash, the pill back
+
+- test29's crash found in its log: panel_button called
+  setBackgroundColor:forState:, which is not UIButton API -- the
+  first row built by any menu's open died at once
+  (NSInvalidArgumentException). The highlight is a stretchable
+  tile now, its corners capped so the rounding survives the
+  stretch; the bogus selector is gone.
+- The pull's pill is back, native: a small handle at the top
+  centre, tappable, bringing the strip down (the top edge's swipe
+  is iOS's own -- notifications -- and a tap was the old tab's own
+  way in). It stands down with the pad: while the strip is down,
+  a menu is open, or the intro is up, it hides with the eye.

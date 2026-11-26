@@ -67,6 +67,7 @@ extern void settings_set_str(const char *key, const char *value);
 static UIWindow      *g_win;
 static UIView        *g_host;        /* where the chrome lives: the root view controller's view (the same view SDL's Metal content lives in; added after, composited and hit-tested above) */
 static UIButton     *g_eye;          /* owned by the window (installed once, never removed) */
+static UIButton     *g_pull_pill;    /* the top-centre handle: a tap brings the strip down (a swipe belongs to iOS's own top edge) */
 static UIView       *g_toast_host;   /* the corner the toasts stack into, owned the same way */
 static UIStackView  *g_toast_stack;  /* the toasts, newest on top, the oldest past three */
 static int           g_installed;    /* ios_ui_chrome_install ran: everything's in place */
@@ -420,11 +421,22 @@ static UIButton *panel_button(CGRect f, NSString *title) {
 	b.titleLabel.font = bar_row_font();
 	[b setTitleColor:rgba(234, 236, 244, 0.94f) forState:UIControlStateNormal];
 	[b setTitle:title forState:UIControlStateNormal];
-	b.layer.backgroundColor = rgba(255, 255, 255, 0.0f).CGColor;   /* the highlight paints on it */
 	[b setTitleColor:[UIColor whiteColor] forState:UIControlStateHighlighted | UIControlStateSelected];
 	b.layer.cornerRadius = 6.0f;
-	[b setBackgroundColor:rgba(255, 255, 255, 0.0f) forState:UIControlStateNormal];
-	[b setBackgroundColor:rgba(255, 255, 255, 0.10f) forState:UIControlStateHighlighted];
+	{	/* test29 crashed on it: setBackgroundColor:forState: is no UIButton API -- the highlight is
+		 * a stretchable tile instead, its corners capped so the rounding survives the stretch */
+		static UIImage *hi;
+		if (!hi) {
+			UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(18, 18)];
+			UIImage *tile = [r imageWithActions:^(UIGraphicsImageRendererContext *rc) {
+				UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 18, 18) cornerRadius:6];
+				[rgba(255, 255, 255, 0.10f) setFill]; [p fill];
+			}];
+			[r release];
+			hi = [tile resizableImageWithCapInsets:UIEdgeInsetsMake(6, 6, 6, 6)];
+		}
+		[b setBackgroundImage:hi forState:UIControlStateHighlighted];
+	}
 	[g_rows addSubview:b];
 	return b;
 }
@@ -1295,6 +1307,11 @@ static ChromeCenter *g_center;
 	ios_ui_haptic(0);   /* the taptic engine answers the flip, as a native switch would */
 	g_eye_on = -1; eye_look();   /* the menu's own wording: the toast routes back here, natively */
 }
+- (void)pill:(id)sender {   /* the handle's tap: the strip, without a gesture from iOS's own edge */
+	(void)sender;
+	ios_ui_bar_open();
+	ios_ui_haptic(0);
+}
 - (void)pulled:(UIPanGestureRecognizer *)p { (void)p; }   /* the observer fires the pull itself; this recogniser never begins */
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g { (void)g; return NO; }   /* so it never takes a touch from the game */
 - (void)tick:(CADisplayLink *)l { (void)l;
@@ -1308,6 +1325,7 @@ static ChromeCenter *g_center;
 		if (hide != g_pad_hidden) {
 			g_pad_hidden = hide;
 			g_eye.hidden = hide;
+			if (g_pull_pill) g_pull_pill.hidden = hide;   /* the handle stands down with the pad, over the strip too */
 			if (g_pad_layer) { g_pad_layer.hidden = hide || !on; [g_pad_layer setNeedsDisplay]; }
 		}
 	}
@@ -1441,6 +1459,26 @@ void ios_ui_chrome_install(void) {
 	[g_host bringSubviewToFront:g_eye];
 	[g_eye release];   /* the host owns it from here */
 	g_eye_on = -1; eye_look();
+
+	{	/* the pull's pill: the old ImGui tab asked for a tap, and the top edge's swipe is iOS's own
+		 * (notifications). A small handle at the top centre, tappable, gone while the strip is down */
+		g_pull_pill = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+		g_pull_pill.frame = CGRectMake(win.bounds.size.width * 0.5f - 20.0f, 6.0f, 40.0f, 16.0f);
+		g_pull_pill.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+		g_pull_pill.layer.cornerRadius = 8.0f;
+		g_pull_pill.layer.backgroundColor = rgba(20, 22, 28, 0.55f).CGColor;
+		g_pull_pill.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.20f].CGColor;
+		g_pull_pill.layer.borderWidth = 0.5f;
+		UIImage *chev = [UIImage systemImageNamed:@"chevron.down"];
+		if (chev) {
+			chev = [chev imageWithTintColor:[UIColor colorWithWhite:1.0f alpha:0.60f] renderingMode:UIImageRenderingModeAlwaysOriginal];
+			[g_pull_pill setImage:chev forState:UIControlStateNormal];
+			g_pull_pill.imageView.contentMode = UIViewContentModeCenter;
+		}
+		[g_pull_pill addTarget:g_center action:@selector(pill:) forControlEvents:UIControlEventTouchUpInside];
+		[g_host addSubview:g_pull_pill];
+		[g_pull_pill release];
+	}
 
 	TopPull *pull = [[TopPull alloc] initWithTarget:g_center action:@selector(pulled:)];
 	pull.delegate = (id)g_center;
