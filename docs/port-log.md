@@ -576,3 +576,17 @@ Three from the phone's report, all clean:
   into images at install; the eye chip's hairline and fill
   stepped up too (40% border, 0.72 fill) so it is findable on a
   black scene as well as a bright one.
+
+### Step 42 — the pill that never painted
+
+- test30/31's pull pill showed nothing at all: measured against
+  its background in the screenshot, the chip never darkened a
+  pixel. Its background was set on the raw layer
+  (layer.backgroundColor) -- the eye, which does paint, sets the
+  view's own backgroundColor property; the pill now takes the
+  eye's proven path (a view property, stronger fill 0.78, a
+  48 x 18 chip, the hand-drawn chevron at 80%).
+- The tick logs the chrome's own answers once, the first time it
+  runs: the pill's and the eye's frames, hidden flags and
+  in-window bits -- if the pill still refuses to paint, the next
+  session's log says exactly which piece of that is true.

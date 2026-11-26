@@ -1367,6 +1367,17 @@ static ChromeCenter *g_center;
 	{	/* the strip alone slides back up when nobody has touched it for a moment (an open panel holds it) */
 		if (g_bar && g_bar_shown && g_panel_tab < 0 && chrome_now() - g_bar_last > 2.5 && !overlay_is_open()) bar_up_close_all();
 	}
+	{	/* once, the whole chrome's own answers: the pill and the eye, their frames and their tree (test30's pill never painted -- this line says which piece of that was true) */
+		static int said = 0;
+		if (!said && g_pull_pill && g_eye) {
+			said = 1;
+			chrome_log("    chrome: chrome check: pill (%.0f, %.0f, %.0f x %.0f) hidden %d in-window %d, eye (%.0f, %.0f, %.0f x %.0f) hidden %d in-window %d",
+			           g_pull_pill.frame.origin.x, g_pull_pill.frame.origin.y, g_pull_pill.frame.size.width, g_pull_pill.frame.size.height,
+			           g_pull_pill.hidden, g_pull_pill.window != nil,
+			           g_eye.frame.origin.x, g_eye.frame.origin.y, g_eye.frame.size.width, g_eye.frame.size.height,
+			           g_eye.hidden, g_eye.window != nil);
+		}
+	}
 	osd_tick();     /* the stats overlay's own label (Off: nothing, ever) */
 	pause_tick();   /* the PAUSED card while Game > Pause, never over a menu */
 	intro_tick();   /* the first-launch strip: its twelve-second and first-touch rules live here */
@@ -1498,18 +1509,22 @@ void ios_ui_chrome_install(void) {
 	{	/* the pull's pill: the old ImGui tab asked for a tap, and the top edge's swipe is iOS's own
 		 * (notifications). A small handle at the top centre, tappable, gone while the strip is down */
 		g_pull_pill = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-		g_pull_pill.frame = CGRectMake(win.bounds.size.width * 0.5f - 20.0f, 6.0f, 40.0f, 16.0f);
+		g_pull_pill.frame = CGRectMake(win.bounds.size.width * 0.5f - 24.0f, 5.0f, 48.0f, 18.0f);
 		g_pull_pill.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
-		g_pull_pill.layer.cornerRadius = 8.0f;
-		g_pull_pill.layer.backgroundColor = rgba(20, 22, 28, 0.55f).CGColor;
-		g_pull_pill.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.20f].CGColor;
+		g_pull_pill.layer.cornerRadius = 9.0f;
+		g_pull_pill.backgroundColor = rgba(16, 18, 24, 0.78f);   /* the view's own property, the eye's proven path (test30's layer.backgroundColor never painted) */
+		g_pull_pill.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.35f].CGColor;
 		g_pull_pill.layer.borderWidth = 0.5f;
-		UIImage *chev = glyph(@"chevron", 12.0f, 8.0f, [UIColor colorWithWhite:1.0f alpha:0.65f]);
+		UIImage *chev = glyph(@"chevron", 13.0f, 9.0f, [UIColor colorWithWhite:1.0f alpha:0.80f]);
 		[g_pull_pill setImage:chev forState:UIControlStateNormal];
 		g_pull_pill.imageView.contentMode = UIViewContentModeCenter;
 		[g_pull_pill addTarget:g_center action:@selector(pill:) forControlEvents:UIControlEventTouchUpInside];
 		[g_host addSubview:g_pull_pill];
+		[g_host bringSubviewToFront:g_pull_pill];
 		[g_pull_pill release];
+		chrome_log("    chrome: pull pill made (%.0f x %.0f at (%.0f, %.0f), window %.0f x %.0f)",
+		           g_pull_pill.frame.size.width, g_pull_pill.frame.size.height, g_pull_pill.frame.origin.x, g_pull_pill.frame.origin.y,
+		           win.bounds.size.width, win.bounds.size.height);
 	}
 
 	TopPull *pull = [[TopPull alloc] initWithTarget:g_center action:@selector(pulled:)];
