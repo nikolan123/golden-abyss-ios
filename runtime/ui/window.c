@@ -970,6 +970,15 @@ void touchpad_set_scale(int percent) {
 }
 int touchpad_mirror(void) { if (tp_mirror_on < 0) tp_mirror_on = settings_int("touchpad_left", 0) != 0; return tp_mirror_on; }
 void touchpad_set_mirror(int on) { tp_mirror_on = on != 0; settings_set_int("touchpad_left", tp_mirror_on); settings_save(); tv.w = -1; }
+/* the floating second stick's corner zone: the player's setting, else the pack's RUN_ENV
+ * (RECOMP_TOUCHPAD_RSTICK), else on. Games that act along the right edge of the screen want
+ * it off (the overlay's menu shows and sets the same value). */
+int window_touchpad_rstick(void) {
+	if (settings_has("touchpad_rstick")) return settings_int("touchpad_rstick", 1) != 0;
+	const char *e = getenv("RECOMP_TOUCHPAD_RSTICK");
+	if (e && *e) return *e != '0';
+	return 1;
+}
 
 /* auto: a device with a touchscreen has it on (a phone), a desktop with one off; RECOMP_TOUCHPAD overrides.
  * The value is cached -- settings are read once, not per frame -- and *invalidated on write*, or the
@@ -1055,11 +1064,12 @@ static int tp_hit(float x, float y) {
 		else if (hypotf(x - b->x, y - b->y) <= b->r * 1.18f) return 10 + i;
 	}
 	if (hypotf(x - tv.sl_x, y - tv.sl_y) <= tv.sl_r * 1.55f) return 1;
-	/* the floating right stick: the lower-right *corner*, and a setting (off: nothing but the buttons
-	 * and the fixed left stick is claimed). The old zone was 55% x 70% of the picture -- a game that
-	 * aims its camera with screen swipes (as this one does) had its swipes eaten in the middle of the
-	 * screen, "touch not working in random places"; the corner is where an aiming thumb lands anyway. */
-	if (settings_int("touchpad_rstick", 1) && y > tv.h * 0.55f) {
+	/* the floating right stick, when the player keeps it: the lower-right *corner* (where an aiming
+	 * thumb lands). A pack can take a side (RECOMP_TOUCHPAD_RSTICK in its RUN_ENV): one whose camera
+	 * is touch swipes and whose actions live along the right edge -- this one -- has nothing for a
+	 * floating stick there but its own icons to steal; the menu's toggle is the player's, and a
+	 * setting always wins over the pack's choice. Off: the corner's touches all go to the game. */
+	if (window_touchpad_rstick() && y > tv.h * 0.55f) {
 		const int right_corner = tv.mirror ? (x < tv.w * 0.40f) : (x > tv.w * 0.60f);
 		if (right_corner) return 2;
 	}
@@ -1380,6 +1390,25 @@ void window_run(void *(*fn)(void *), void *arg) {
 			/* the save-data dialog waiting on the player (overlay_dialog_active): it has the keys and the mouse;
 			 * the game is polling the dialog, not the pad */
 			if (overlay_dialog_active()) { overlay_process_event(&e); continue; }
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			/* re-entering the foreground (the screenshot swipe, the app switcher glanced at for a
+			 * moment) left SDL believing a stale, small window once -- the whole picture squashed into
+			 * a corner of the screen, the on-screen controls huge in the opposite corners, until the
+			 * app restarted; a device's report, 2026-11-26. The screen's own size is re-asserted here
+			 * every time focus returns: a window that already has it costs one query and no reshape. */
+			if (win && (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED || e.type == SDL_EVENT_WINDOW_RESTORED)) {
+				const SDL_DisplayID d = SDL_GetDisplayForWindow(win);
+				const SDL_DisplayMode *dm = d ? SDL_GetDesktopDisplayMode(d) : NULL;
+				if (dm) {
+					int sw = dm->w, sh = dm->h;
+					if (sh > sw) { int t = sw; sw = sh; sh = t; }   /* (this app is landscape-only: the natural portrait flips) */
+					int cw = 0, ch = 0; SDL_GetWindowSize(win, &cw, &ch);
+					fprintf(stderr, "    window: foreground again; the screen is %dx%d, the window says %dx%d%s\n", sw, sh, cw, ch,
+					        (cw == sw && ch == sh) ? "" : " -- re-asserting the window's size");
+					if (cw != sw || ch != sh) SDL_SetWindowSize(win, sw, sh);
+				}
+			}
+#endif
 			/* closed: ImGui still sees the mouse (and the window's focus/enter/leave), so the menu bar can
 			 * show on a hover at the top edge; a press or a move it has claimed (the pointer over the bar,
 			 * a menu or the pull tab, as of the last frame drawn) never becomes a touch below. A release

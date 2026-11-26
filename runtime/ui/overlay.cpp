@@ -101,6 +101,7 @@ int window_get_aspect(void); void window_set_aspect(int mode);
 int window_get_fullscreen(void); void window_set_fullscreen(int on);
 int window_raw_look(void); void window_set_raw_look(int on);
 int window_controls_count(void);
+int window_touchpad_rstick(void);   /* (window.c: the effective corner-stick zone -- the pack may set a default) */
 int window_gyro_present(void);
 void motion_recenter(void);
 void window_controls_row(int i, const char **action, const char **key, const char **pad);
@@ -562,7 +563,7 @@ static void page_controls(void) {
 			ui::row("On-screen pad", "The sticks, buttons and shoulders drawn over the picture. Off: the screen is only the Vita's touch panel.");
 			{ bool on = touchpad_on(); if (ui::toggle("tp_on", &on)) touchpad_set_on(on); }
 			ui::row("Second stick", "A floating right stick where a thumb lands in the lower right corner. Off: every touch there goes to the game instead (a game that aims by swiping the picture wants it off).");
-			{ bool rs = settings_int("touchpad_rstick", 1) != 0; if (ui::toggle("tp_rs", &rs)) { settings_set_int("touchpad_rstick", rs ? 1 : 0); settings_save(); } }
+			{ bool rs = window_touchpad_rstick() != 0; if (ui::toggle("tp_rs", &rs)) { settings_set_int("touchpad_rstick", rs ? 1 : 0); settings_save(); } }
 			ui::row("Pad size");
 			{ int v = touchpad_scale(); ImGui::SetNextItemWidth(-FLT_MIN);
 			  if (ImGui::SliderInt("##tpsc", &v, 60, 160, "%d%%")) touchpad_set_scale(v); }
@@ -918,7 +919,7 @@ static void menu_controls(void) {
 	if (phone_ui()) {   /* a phone: the on-screen pad itself; the touch-cursor rows are a controller's lore */
 		bool on = touchpad_on();
 		if (ImGui::MenuItem("On-screen controls", nullptr, &on)) touchpad_set_on(on);
-		{	bool rs = settings_int("touchpad_rstick", 1) != 0;   /* off: a game that aims by swiping the picture gets every touch */
+		{	bool rs = window_touchpad_rstick() != 0;   /* off: a game that aims by swiping the picture gets every touch */
 			if (ImGui::MenuItem("Second stick (the lower right corner)", nullptr, &rs)) { settings_set_int("touchpad_rstick", rs ? 1 : 0); settings_save(); } }
 		{	int v = touchpad_scale(); ImGui::TextUnformatted("Control size");
 			ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
@@ -1017,6 +1018,51 @@ static void build_tab(float w, double t) {
 		const float cx = (p0.x + p1.x) * 0.5f, cy = p0.y + th * 0.3f;
 		dl->AddLine(ImVec2(cx - 6, cy), ImVec2(cx, cy + 5), c, 2.0f);
 		dl->AddLine(ImVec2(cx, cy + 5), ImVec2(cx + 6, cy), c, 2.0f);
+	}
+	ImGui::End();
+	ImGui::PopStyleVar(3);
+}
+/* the phone's own request, found the hard way: controls to turn the controls off and on, right there
+ * on the glass. A small chip beside the pull tab (the one corner of the top strip nothing else wants,
+ * and beside the thing it belongs to), always drawn -- even with the pad hidden, that being its
+ * point -- an outlined stick that is slashed when the pad is off. A tap flips touchpad live (the
+ * toggle obeys since the cache invalidates), a toast says what happened, and the pad's own fingers
+ * keep the rest of the screen. While the bar is down it makes way: the bar's Game menu holds the
+ * same switch among all the others. */
+static void build_pad_toggle(float w) {
+	if (!phone_ui()) return;
+	const float tw = 110;                                  /* (the pull tab beside it, its phone width) */
+	const float cw = 46, ch = 24, x0 = w * 0.5f + tw * 0.5f + 12;
+	ImGui::SetNextWindowPos(ImVec2(x0, 0));
+	ImGui::SetNextWindowSize(ImVec2(cw, ch));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0, 0));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+	if (ImGui::Begin("##padtog", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+	                                 ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollWithMouse)) {
+		const bool on = touchpad_on();
+		if (ImGui::InvisibleButton("pad", ImVec2(cw, ch))) {
+			touchpad_set_on(on ? 0 : 1);
+			overlay_toast_titled(on ? "Controls off" : "Controls on", on ? "The chip brings them back." : "", 2.4);
+		}
+		const bool hov = ImGui::IsItemHovered();
+		ImDrawList *dl = ImGui::GetForegroundDrawList();
+		const ImVec2 p0 = ImGui::GetItemRectMin(), p1 = ImGui::GetItemRectMax();
+		const ImU32 bg = IM_COL32(30, 30, 36, (int)((hov ? 0.90f : 0.66f) * 255));
+		dl->AddRectFilled(p0, p1, bg, ch * 0.42f, ImDrawFlags_RoundCornersBottom);
+		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, (int)(hov ? 0.28f * 255 : 0.12f * 255)), ch * 0.42f, 1.0f, ImDrawFlags_RoundCornersBottom);
+		const ImVec2 c((p0.x + p1.x) * 0.5f, p0.y + ch * 0.54f);
+		const float r = ch * 0.27f;
+		const ImU32 icon = on ? IM_COL32(235, 240, 255, 235) : IM_COL32(150, 156, 172, 190);
+		if (on) {
+			dl->AddCircle(c, r, icon, 24, 1.6f);
+			dl->AddCircleFilled(c, r * 0.40f, icon);
+		} else {
+			dl->AddCircle(c, r, icon, 24, 1.4f);
+			dl->AddCircle(c, r * 0.40f, icon, 16, 1.2f);
+			const float d = r * 1.55f;
+			dl->AddLine(ImVec2(c.x - d, c.y + d), ImVec2(c.x + d, c.y - d), icon, 1.6f);
+		}
 	}
 	ImGui::End();
 	ImGui::PopStyleVar(3);
@@ -1477,6 +1523,9 @@ static void build_closed(void) {
 		if (g_bar_want && t - g_bar_active_t > HIDE_S) g_bar_want = false;
 		/* the pull tab: with the pointer near the top while the bar is away, and with the hint */
 		const bool near_top = inside && m.y < TAB_NEAR_PX;
+		/* (a phone's own report on the tab fading in only near the top -- "I had to first trigger then
+		 * pull, and it was good like that": that stays; the always-there chip beside it -- build_pad_toggle --
+		 * is for the controls, and the talk box below explains itself) */
 		const float tab_target = (near_top || t < g_toast_until) && g_bar_vis <= 0.01f ? 1.0f : 0.0f;
 		g_tab_a += (tab_target - g_tab_a) * (dt > 0.1f ? 1.0f : dt * 8.0f);
 		if ((tab_target == 0.0f && g_tab_a < 0.02f) || g_bar_vis > 0.01f) g_tab_a = 0;   /* (gone at once as the bar arrives: the two never overlap) */
@@ -1504,6 +1553,7 @@ static void build_closed(void) {
 	}
 	if (g_bar_vis > 0) build_bar(w);
 	if (g_tab_a > 0) build_tab(w, t);
+	if (g_bar_vis <= 0.01f) build_pad_toggle(w);   /* (the chip: always there while the bar is away) */
 	if (g_intro) build_intro();   /* (the touch card in place of the pause banner; the markers drawn over it) */
 	build_marks();
 	if (g_has_window) { build_save_dialog(w, hgt); build_msg_dialog(w, hgt); build_ime_dialog(w, hgt); }
@@ -1778,7 +1828,7 @@ static void build_intro_hint(void) {
 	if (g_intro_done < 0) {
 		ui::heading("Playing on this phone", em * 1.05f);
 		ui::muted_wrapped("The sticks, buttons and shoulders are at the edges. The picture itself is the Vita's touch screen: tap and drag it.");
-		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("Pull down from the top of the screen for the menu."); ImGui::PopStyleColor();
+		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("Pull down from the top for the menu. The chip up there turns these controls off and on."); ImGui::PopStyleColor();
 	} else {
 		ImGui::PushStyleColor(ImGuiCol_Text, ui::accent); ImGui::TextUnformatted("That's it -- back to the game."); ImGui::PopStyleColor();
 	}

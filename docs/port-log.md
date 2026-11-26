@@ -98,3 +98,31 @@ the injection now impossible (the report correlated it with the HUD
 being on); and the joystick, whose "not working" fits the racing
 layouts -- same fix, first test will tell.
 
+
+### Step 21 — the HUD chip, the pack's own corner, and re-entry healed
+
+test10's device round (a 15 Pro Max):
+
+- **"The screenshot swipe squashes the game into a corner."**
+  Re-entering the foreground can leave SDL believing a stale, small
+  window (the whole picture shrunk against the lower-left corner, the
+  on-screen controls huge in the upper-left, until the app restarted).
+  Every time focus returns the window's size is re-asserted from the
+  display's own mode (points; portrait flipped -- this app is
+  landscape-only), a reshape only when it actually drifted, one log
+  line each time. The plist also gained CADisableMinimumFrameDurationOnPhone
+  (SDL's own advice for 120 Hz phones).
+- **"The HUD blocks the game's touchable icons."** Golden Abyss keeps
+  its actions along the right edge (the icon bar) and aims its camera
+  by swipes -- exactly the lower-right corner the floating second
+  stick claimed. The zone is a pack's choice now
+  (RECOMP_TOUCHPAD_RSTICK in RUN_ENV); this pack takes it *off*, the
+  menu's "Second stick" toggle overrules for a player, and the toggle
+  reads the effective value.
+- **"The pull tab was fine as it was."** The always-faint tab idea was
+  reverted: the tab fades in near the top, as before.
+- **The controls chip** (the phone's own request): a small stick-icon
+  chip at the top, beside the pull tab, always drawn -- even with the
+  pad off, that being its point -- a tap flips the on-screen pad live
+  (the toggle obeys since Step 20), a toast says which way, a slash
+  through the icon when off. The first-run strip teaches it.
