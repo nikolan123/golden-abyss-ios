@@ -349,3 +349,15 @@ the top bar's centre (RECOMP_PAD_CANVAS_DEBUG=0 takes it off).
 Seeing the square with buttons painted says the move fixed it;
 seeing nothing with the draw count climbing would say compositing
 still, and the next move is written from that.
+
+### Step 31 — %@ is not a C format specifier
+
+test20 insta-crashed, and its log caught the killer mid-sentence:
+"chrome: install (... host 0x11ec04000 @," -- chrome_log formats
+with plain vfprintf, and `%@` is Foundation's, not C's: vfprintf
+took a Class object where it wanted an NSString and died in place.
+The fix is a string literal where the class went ("the root view" /
+"the window itself") -- and the dying line, usefully, had already
+confirmed the real prize: the root view controller's view exists and
+is not the window, so the chrome's new home from Step 30 is exactly
+where it was meant to live.

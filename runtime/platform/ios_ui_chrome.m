@@ -480,8 +480,8 @@ void ios_ui_chrome_install(void) {
 		const char *np = getenv("RECOMP_NATIVE_PAD");   /* =0: the native pad never comes up (the ImGui pad and the finger path again) */
 		g_pad_disabled = np && np[0] == '0' && np[1] == '\0';
 	}
-	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p %@, %d subviews; pad %s)", win, win.bounds.size.width, win.bounds.size.height,
-	           g_host, [g_host class], (int)g_host.subviews.count, g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
+	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p (%s), %d subviews; pad %s)", win, win.bounds.size.width, win.bounds.size.height,
+	           g_host, g_host == win ? "the window itself" : "the root view", (int)g_host.subviews.count, g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
 
 	g_center = [[ChromeCenter alloc] init];   /* kept: UIKit's targets and delegates don't retain */
 	g_eye = [[UIButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
