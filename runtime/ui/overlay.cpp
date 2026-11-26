@@ -454,17 +454,15 @@ static void page_display(void) {
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
-/* Apple's Metal HUD, as a menu row: macOS only. On an iPhone it means MTL_HUD_ENABLED, which a jailbroken
- * phone answers with a dylib injector (libMTLHud) that hooks the layer machinery -- a device's own report
- * (2026-11-26): with it on, touches died in places and the orientation broke on an app-switcher re-entry;
- * with it off and a restart, both worked. A phone's stats are the overlay's own drawn HUD (On-screen stats). */
+/* Apple platforms expose the saved, opt-in Metal HUD preference. */
 static bool metal_hud_row(void) {
-#if defined(__APPLE__) && (!defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE)
-	return true;
+#ifdef __APPLE__
+    return true;
 #else
-	return false;
+    return false;
 #endif
 }
+
 static void page_performance(void) {	if (!ui::rows_begin("perf")) return;
 	ui::row("On-screen stats", phone_ui() ? "Frame rate and timings drawn over the game."
 	                                    : "Frame rate and timings drawn over the game. F1 cycles them.");
@@ -950,7 +948,7 @@ static void menu_view(void) {
 		{	int rs = gfx_gpu_render_scale_wanted(), mx = gfx_gpu_render_scale_max(); if (mx > 3) mx = 3;   /* a phone's screen is 2-3x the Vita's */
 			for (int n = 1; n <= mx; n++) { char l[48]; scale_label(l, sizeof l, n); if (ImGui::MenuItem(l, nullptr, rs == n)) gfx_gpu_render_scale_request(n); }
 			ImGui::Unindent(); }
-		if (metal_hud_row()) {   /* (macOS's desktop-phone test only: on an iPhone, injected HUDs break the touch and the orientation; the phone's own stats are above) */
+		if (metal_hud_row()) {   /* saved Metal overlay preference; applied after restart */
 			ImGui::Separator();
 			bool mh = settings_int("metal_hud", 0) != 0;
 			if (ImGui::MenuItem("Metal HUD", nullptr, &mh)) { settings_set_int("metal_hud", mh ? 1 : 0); settings_save(); }

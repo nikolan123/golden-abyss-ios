@@ -370,18 +370,13 @@ void *gfx_gpu_create_device(void) {
 	SDL_GPUDevice *d = 0;
 #ifdef __APPLE__
 #include <TargetConditionals.h>
-	/* Apple's Metal HUD -- frame rate, GPU time, memory, drawn by the Metal framework (or, on a jailbroken
-	 * *phone*, by a third-party injected dylib: libMTLHud answers the same MTL_HUD_ENABLED) -- is switched on
-	 * by an environment variable read when the device is made, so the setting is applied here, before SDL
-	 * makes one. macOS only: on an iPhone that injected HUD hooks the layer machinery itself, which broke
-	 * the touch screen in places and the orientation on an app-switcher re-entry (a device's own report,
-	 * 2026-11-26: with it off, a restart worked); a phone's stats come from the overlay's own drawn HUD
-	 * (metrics.c), which touches nothing. RECOMP_METAL_HUD forces either way (its debug value). */
-#if !TARGET_OS_IPHONE
-	{ const char *e = getenv("RECOMP_METAL_HUD");
-	  int on = e && *e ? atoi(e) != 0 : settings_int("metal_hud", 0) != 0;
-	  if (on) setenv("MTL_HUD_ENABLED", "1", 1); }
-#endif
+    /* Apply the saved opt-in before SDL creates Metal's device/layer. An explicit
+     * RECOMP_METAL_HUD override wins; otherwise preserve an externally supplied HUD
+     * environment when no preference has ever been saved. */
+    { const char *e = getenv("RECOMP_METAL_HUD");
+      if (e && *e) setenv("MTL_HUD_ENABLED", atoi(e) ? "1" : "0", 1);
+      else if (settings_has("metal_hud")) setenv("MTL_HUD_ENABLED", settings_int("metal_hud", 0) ? "1" : "0", 1); }
+
 #endif
 #ifndef __APPLE__   /* (on Apple, Metal: SDL could otherwise find MoltenVK) */
 	if (!getenv("SDL_GPU_DRIVER") || !strcmp(getenv("SDL_GPU_DRIVER"), "vulkan")) {

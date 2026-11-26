@@ -58,7 +58,7 @@ extern void settings_set_str(const char *key, const char *value);
 static UIWindow      *g_win;
 static UIView        *g_host;        /* pass-through window child above SDL's final root view */
 static UIButton     *g_eye;          /* owned by the window (installed once, never removed) */
-static UIButton     *g_pull_pill;    /* the top-centre handle: a tap brings the strip down (a swipe belongs to iOS's own top edge) */
+static UIButton     *g_menu_gear;    /* gear below the eye opens the quick menu */
 static UIView       *g_toast_host;   /* the corner the toasts stack into, owned the same way */
 static UIStackView  *g_toast_stack;  /* the toasts, newest on top, the oldest past three */
 static int           g_installed;    /* ios_ui_chrome_install ran: everything's in place */
@@ -134,6 +134,19 @@ static UIImage *glyph(NSString *kind, CGFloat w, CGFloat h, UIColor *stroke) {
 				[s addLineToPoint:CGPointMake(w - 1.0f, 1.0f)];
 				[s stroke];
 			}
+        } else if ([kind isEqualToString:@"gear"]) {
+            UIBezierPath *outline = [UIBezierPath bezierPath];
+            const CGFloat cx = w / 2, cy = h / 2, radius = fmin(w, h);
+            for (int i = 0; i < 32; i++) {
+                const CGFloat a = (i + 0.5) * M_PI / 16;
+                const CGFloat r = radius * ((i % 4 == 0 || i % 4 == 3) ? 0.34 : 0.46);
+                const CGPoint p = CGPointMake(cx + cos(a) * r, cy + sin(a) * r);
+                if (!i) [outline moveToPoint:p]; else [outline addLineToPoint:p];
+            }
+            [outline closePath];
+            CGContextAddPath(c, outline.CGPath);
+            CGContextAddEllipseInRect(c, CGRectMake(cx - radius * 0.15, cy - radius * 0.15, radius * 0.3, radius * 0.3));
+            CGContextEOFillPath(c);
 		} else if ([kind isEqualToString:@"chevron"]) {
 			UIBezierPath *p = [UIBezierPath bezierPath];
 			[p moveToPoint:CGPointMake(w * 0.26f, h * 0.40f)];
@@ -558,6 +571,13 @@ static CGFloat panel_rows(int tab) {
 				y += row;
 			}
 		}
+        b = panel_button(CGRectMake(0, y, vb.size.width, row), @"Metal HUD (restart)");
+        if (settings_int("metal_hud", 0)) panel_dot(CGRectMake(vb.size.width - 20, y + row * 0.5f - 3, 6, 6));
+        panel_fire_on_highlight(b, ^{
+            settings_set_int("metal_hud", !settings_int("metal_hud", 0)); settings_save();
+            overlay_toast_titled("Metal HUD", "Restart the app to apply this change.", 3);
+            bar_panel_rebuild();
+        }); y += row;
 		y += 4; panel_line(CGRectMake(0, y, vb.size.width, 1)); y += 8;
 		{
 			UILabel *h = panel_head(CGRectMake(inset, y, vb.size.width - 2 * inset, 16), @"Resolution"); (void)h;
@@ -781,7 +801,7 @@ static void osd_tick(void) {
 	g_osd_lbl.text = txt;
 	const CGSize tz = [g_osd_lbl sizeThatFits:CGSizeMake(600.0f, 2000.0f)];
 	CGFloat y = 42.0f;   /* under the eye's own slot */
-	if (g_eye && !g_eye.hidden) { const CGFloat ey = CGRectGetMaxY(g_eye.frame) + 8.0f; if (ey > y) y = ey; }
+	if (g_eye && !g_eye.hidden) { const CGFloat ey = CGRectGetMaxY(g_menu_gear.frame) + 8.0f; if (ey > y) y = ey; }
 	g_osd_lbl.frame = CGRectMake(chrome_safe_rect().origin.x + 8.0f, y, tz.width + 12.0f, tz.height + 10.0f);
 	g_osd_lbl.hidden = NO;
 }
@@ -848,7 +868,7 @@ static void intro_tick(void) {
         [g_intro_view addSubview:g_intro_title]; [g_intro_title release];
         g_intro_body = [[UILabel alloc] init]; g_intro_body.numberOfLines = 0;
         g_intro_body.font = [UIFont systemFontOfSize:13]; g_intro_body.textColor = rgba(220, 224, 234, 1);
-        g_intro_body.text = @"Hold or drag the lower corners for the sticks. Quick taps touch the game. Tap Menu at the top centre for settings; the eye hides or shows the controls.";
+        g_intro_body.text = @"Hold or drag the lower corners for the sticks. Quick taps touch the game. Tap the gear below the eye for settings; the eye hides or shows the controls.";
         [g_intro_view addSubview:g_intro_body]; [g_intro_body release];
         [g_host addSubview:g_intro_view]; [g_intro_view release];
     }
@@ -1038,6 +1058,13 @@ static void cfg_page_performance(void) {
 		});
 		r->detail = @"Frame rate and timings drawn over the game";
 	}
+    {
+        CfgRow *r = cfg_switch("Metal HUD", settings_int("metal_hud", 0), ^(int on) {
+            settings_set_int("metal_hud", on); settings_save();
+            overlay_toast_titled("Metal HUD", "Restart the app to apply this change.", 3);
+        });
+        r->detail = @"Apple's GPU overlay. Restart the app to apply.";
+    }
 	cfg_head("Now");
 	{
 		CfgRow *r = cfg_row(R_PAIR);
@@ -1122,14 +1149,14 @@ static void cfg_page_help(void) {
 	cfg_head("The controls");
 	cfg_note("Hold or drag the lower left for the movement stick, or the lower right for the camera stick. A quick tap still touches the game. Left-handed mode swaps the sides.");
 	cfg_note("The picture itself is the Vita's touch screen: tap and drag it as you would the real thing.");
-	cfg_note("Tap Menu at the top centre for the quick menu. Game > All settings opens these pages and pauses the game. Done resumes play.");
+	cfg_note("Tap the gear below the eye for the quick menu. Game > All settings opens these pages and pauses the game. Done resumes play.");
 	cfg_head("About");
 	{
 		CfgRow *r = cfg_row(R_TEXT);
 		r->title = [[NSString alloc] initWithUTF8String:"Project Nativ"];
 		r->detail = [[NSString alloc] initWithUTF8String:"This PS Vita game, statically recompiled to native code, running on this phone's own CPU and GPU."];
 	}
-	cfg_note("The eye at the top left hides or shows the pad. The eye and Menu stay available when the pad is hidden.");
+	cfg_note("The eye at the top left hides or shows the pad. The eye and gear stay available when the pad is hidden.");
 }
 
 static void cfg_close(void);
@@ -1485,7 +1512,7 @@ static ChromeCenter *g_center;
     if (g_eye) eye_look();
     const int reasons = overlay_pad_hidden();
     const BOOL hideChrome = overlay_is_open() || bar_visible() || (reasons & 8);
-    g_eye.hidden = hideChrome; g_pull_pill.hidden = hideChrome;
+    g_eye.hidden = hideChrome; g_menu_gear.hidden = hideChrome;
     const BOOL hidePad = !touchpad_on() || reasons || bar_visible();
     for (int i = 0; i < 8; i++) if (g_pad_hits[i]) {
         if (hidePad && g_pad_hits[i]->down) { g_pad_hits[i]->down = 0; touchpad_native_release(10 + i); }
@@ -1646,27 +1673,27 @@ void ios_ui_chrome_install(void *native_window) {
 
 	{	/* the pull's pill: the old ImGui tab asked for a tap, and the top edge's swipe is iOS's own
 		 * (notifications). A small handle at the top centre, tappable, gone while the strip is down */
-		g_pull_pill = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];
-		g_pull_pill.frame = CGRectMake(win.bounds.size.width * 0.5f - 32, 5, 64, 32);
-		g_pull_pill.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
-		g_pull_pill.layer.cornerRadius = 12.0f;
-        [g_pull_pill setTitle:@"Menu" forState:UIControlStateNormal];
-        g_pull_pill.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-        g_pull_pill.accessibilityLabel = @"Open quick menu";
-		g_pull_pill.backgroundColor = rgba(16, 18, 24, 0.78f);   /* readable over both dark and bright scenes */
-		g_pull_pill.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.35f].CGColor;
-		g_pull_pill.layer.borderWidth = 0.5f;
-		[g_pull_pill addTarget:g_center action:@selector(pill:) forControlEvents:UIControlEventTouchUpInside];
-		[g_host addSubview:g_pull_pill];
-		[g_host bringSubviewToFront:g_pull_pill];
-		[g_pull_pill release];
+		g_menu_gear = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];
+		g_menu_gear.frame = CGRectMake(8, 49, 46, 32);
+		g_menu_gear.autoresizingMask = UIViewAutoresizingFlexibleRightMargin;
+		g_menu_gear.layer.cornerRadius = 12.0f;
+        [g_menu_gear setImage:[glyph(@"gear", 22, 22, [UIColor whiteColor]) imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
+        g_menu_gear.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        g_menu_gear.accessibilityLabel = @"Open quick menu";
+		g_menu_gear.backgroundColor = rgba(16, 18, 24, 0.78f);   /* readable over both dark and bright scenes */
+		g_menu_gear.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.35f].CGColor;
+		g_menu_gear.layer.borderWidth = 0.5f;
+		[g_menu_gear addTarget:g_center action:@selector(pill:) forControlEvents:UIControlEventTouchUpInside];
+		[g_host addSubview:g_menu_gear];
+		[g_host bringSubviewToFront:g_menu_gear];
+		[g_menu_gear release];
 		chrome_log("    chrome: pull pill made (%.0f x %.0f at (%.0f, %.0f), window %.0f x %.0f)",
-		           g_pull_pill.frame.size.width, g_pull_pill.frame.size.height, g_pull_pill.frame.origin.x, g_pull_pill.frame.origin.y,
+		           g_menu_gear.frame.size.width, g_menu_gear.frame.size.height, g_menu_gear.frame.origin.x, g_menu_gear.frame.origin.y,
 		           win.bounds.size.width, win.bounds.size.height);
 	}
 
     UIPanGestureRecognizer *pull = [[UIPanGestureRecognizer alloc] initWithTarget:g_center action:@selector(pulled:)];
-    [g_pull_pill addGestureRecognizer:pull]; [pull release];
+    [g_menu_gear addGestureRecognizer:pull]; [pull release];
 
 	{	/* the pad: cached control artwork, synced by the display link, and its touch
 		 * areas (picked up by tp_layout's own call, ios_ui_pad_layout, as its numbers change) */
@@ -1708,7 +1735,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test35 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test36 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill
@@ -1724,7 +1751,7 @@ static void chrome_layout(void) {
     const CGFloat top = 5 + g_win.safeAreaInsets.top;
     const CGFloat margin = bounds.size.height * 0.025 + fmin(g_win.safeAreaInsets.left, bounds.size.height * 0.03);
     g_eye.frame = CGRectMake(margin, top, 46, 32);
-    g_pull_pill.frame = CGRectMake(bounds.size.width / 2 - 32, top, 64, 32);
+    g_menu_gear.frame = CGRectMake(margin, CGRectGetMaxY(g_eye.frame) + 12, 46, 32);
     g_pad_layer.frame = bounds;
     if (g_shield) g_shield.frame = bounds;
     if (g_bar) {
