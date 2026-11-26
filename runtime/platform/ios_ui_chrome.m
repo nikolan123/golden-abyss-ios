@@ -40,8 +40,23 @@ static UIStackView  *g_toast_stack;  /* the toasts, newest on top, the oldest pa
 static int           g_installed;    /* ios_ui_chrome_install ran: everything's in place */
 static int           g_eye_on = -1;  /* what the eye last drew: the menu's toggle must reach it too */
 static int           g_pad_hidden = -1;   /* what the pad last showed under: 0 over the game, 1 under a menu, set hidden to match */
+static int           g_pad_disabled;      /* RECOMP_NATIVE_PAD=0: the native pad stands down (the ImGui pad draws, the finger path owns the taps) */
+
+/* while the chrome is installed this is the pad's own word: overlay.cpp gates pad_draw on it, so
+ * a disabled native pad is the *whole* ImGui pad exactly as before, not a blank screen */
+int ios_ui_chrome_pad_on(void) { return g_installed && !g_pad_disabled; }
 
 int ios_ui_chrome_active(void) { return g_installed; }
+
+/* the session log tells the story of a phone from a thousand miles away: every state flip and
+ * every tap of the chrome says itself here, stderr into the same log the game writes */
+static void chrome_log(const char *fmt, ...) {
+	va_list ap; va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	fputc('\n', stderr);
+	va_end(ap);
+}
+static double chrome_now(void) { return (double)(int64_t)(CFAbsoluteTimeGetCurrent() + 978307200.0); }   /* the game's own clock: unix seconds */
 
 /* ---- the eye ---------------------------------------------------------------------------- */
 static void eye_look(void) {
@@ -93,12 +108,17 @@ static void eye_look(void) {
 	const float cxr = self.bounds.size.width * 0.5f, cyr = self.bounds.size.height * 0.5f;
 	return hypotf(p.x - cxr, p.y - cyr) <= cxr;   /* the 1.18-radius circle, in the box the frame is */
 }
-- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)ev { (void)t; (void)ev;
-	if (!down) { down = 1; if (!overlay_is_open()) { touchpad_native_press(10 + idx); ios_ui_haptic(pill ? 1 : 0); } } }
+- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)ev { (void)ev;
+	const CGPoint p = [[t anyObject] locationInView:nil];
+	if (!down) {
+		down = 1;
+		if (!overlay_is_open()) { touchpad_native_press(10 + idx); ios_ui_haptic(pill ? 1 : 0); }
+		chrome_log("    chrome: btn %d (%s) down at (%.0f, %.0f), pressed %d", idx, pill ? "pill" : "round", p.x, p.y, !overlay_is_open());
+	} }
 - (void)touchesEnded:(NSSet<UITouch *> *)t withEvent:(UIEvent *)ev { (void)t; (void)ev;
-	if (down) { down = 0; touchpad_native_release(10 + idx); } }
+	if (down) { chrome_log("    chrome: btn %d up", idx); down = 0; touchpad_native_release(10 + idx); } }
 - (void)touchesCancelled:(NSSet<UITouch *> *)t withEvent:(UIEvent *)ev { (void)t; (void)ev;
-	if (down) { down = 0; touchpad_native_release(10 + idx); } }
+	if (down) { chrome_log("    chrome: btn %d cancelled", idx); down = 0; touchpad_native_release(10 + idx); } }
 @end
 
 static UIColor *rgba(int r, int g, int b, float a) { return [UIColor colorWithRed:r / 255.0f green:g / 255.0f blue:b / 255.0f alpha:a]; }
@@ -237,6 +257,7 @@ void ios_ui_haptic(int kind) {
 	if (!g_installed) return;
 	if (kind < 0 || kind > 2) kind = 0;
 	if (![NSThread isMainThread]) { const int k = kind; dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_haptic(k); }); return; }
+	chrome_log("    chrome: haptic %d (%s)", kind, kind == 2 ? "a stick spawned" : kind == 1 ? "a shoulder" : "a button, the eye, a pull");
 	if (!g_hap[kind]) {
 		g_hap[kind] = [[UIImpactFeedbackGenerator alloc] initWithStyle:(kind == 1 ? UIImpactFeedbackStyleMedium : kind == 2 ? UIImpactFeedbackStyleSoft : UIImpactFeedbackStyleLight)];
 		[g_hap[kind] prepare];
@@ -251,7 +272,14 @@ void ios_ui_pad_layout(void) {
 	if (!g_installed || !g_win) return;
 	if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_pad_layout(); }); return; }
 	const TpVisual *tv = touchpad_visuals();
+	if (g_pad_disabled) {   /* theImGui pad is drawing: nothing of ours may take a touch or a pixel */
+		g_pad_layer.hidden = YES;
+		for (int i = 0; i < 8; i++) if (g_pad_hits[i]) g_pad_hits[i].hidden = YES;
+		return;
+	}
 	g_pad_layer.hidden = !tv->on;   /* (its drawing checks the same flag: this hides the canvas itself) */
+	chrome_log("    chrome: pad layout (%s) %d buttons, canvas %.0fx%.0f at (%.0f, %.0f)", tv->on ? "on" : "off", tv->nb,
+	           g_pad_layer.bounds.size.width, g_pad_layer.bounds.size.height, g_pad_layer.frame.origin.x, g_pad_layer.frame.origin.y);
 	for (int i = 0; i < 8; i++) {
 		PadBtn *v = g_pad_hits[i];
 		if (!v) {
@@ -268,6 +296,7 @@ void ios_ui_pad_layout(void) {
 		if (b->pill) v.frame = CGRectMake(b->x - b->hw, b->y - b->hh, 2 * b->hw, 2 * b->hh);
 		else { const float e = b->r * 1.18f; v.frame = CGRectMake(b->x - e, b->y - e, 2 * e, 2 * e); }
 		v.hidden = NO;
+		chrome_log("    chrome:   btn %d -> (%.0f, %.0f, %.0f x %.0f) %s", i, v.frame.origin.x, v.frame.origin.y, v.frame.size.width, v.frame.size.height, b->pill ? "pill" : "round");
 	}
 }
 
@@ -311,17 +340,37 @@ static ChromeCenter *g_center;
 	ios_ui_haptic(0);   /* the taptic engine answers the flip, as a native switch would */
 	g_eye_on = -1; eye_look();   /* the menu's own wording: the toast routes back here, natively */
 }
-- (void)pulled:(UIPanGestureRecognizer *)p { if (p.state == UIGestureRecognizerStateBegan) { overlay_bar_open(); ios_ui_haptic(0); } }
+- (void)pulled:(UIPanGestureRecognizer *)p { if (p.state == UIGestureRecognizerStateBegan) { TopPull *tp = (TopPull *)p; chrome_log("    chrome: pull began, start (%.0f, %.0f), now (%.0f, %.0f)", tp.startX, tp.startY, [p locationInView:nil].x, [p locationInView:nil].y); overlay_bar_open(); ios_ui_haptic(0); } }
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g { return [(TopPull *)g shouldPull]; }
 - (void)tick:(CADisplayLink *)l { (void)l;
+	const int on = touchpad_on();
 	if (g_eye) eye_look();   /* the menu's toggle reaches the eye */
-	{	/* the bar, its menus, a dialog: whatever ImGui holds over the picture gets the pixels, and
+	{
+		/* the bar, its menus, a dialog: whatever ImGui holds over the picture gets the pixels, and
 		 * the pad's controls (their drawing: the layer; their taps: the buttons under it) stand down */
-		const int hide = overlay_pad_hidden() ? 1 : 0;
+		const int hide = overlay_pad_hidden() != 0;   /* (bitmask of its reasons: the once-a-second line tells) */
 		if (hide != g_pad_hidden) {
 			g_pad_hidden = hide;
 			g_eye.hidden = hide;
-			if (g_pad_layer) { g_pad_layer.hidden = hide || !touchpad_on(); [g_pad_layer setNeedsDisplay]; }
+			if (g_pad_layer) { g_pad_layer.hidden = hide || !on; [g_pad_layer setNeedsDisplay]; }
+		}
+	}
+	{
+		/* once a second, the chrome's whole state in one line: the hidden bits (why the pad stood
+		 * down: 1 the menu, 2 the intro, 4 the bar down, 8 a popup), what the pads and sticks are
+		 * doing, and which buttons think they have a thumb */
+		static double said; static int said_on = -1, said_eye = -1;
+		const double now = chrome_now();
+		if (on != said_on) { said = 0; said_on = on; said_eye = -1; }   /* a pad flip says itself at once */
+		if (now - said >= 1.0) {
+			said = now;
+			const TpVisual *tv = touchpad_visuals();
+			char held[16]; int n = 0;
+			for (int i = 0; tv->on && i < tv->nb && i < 8; i++) held[n++] = g_pad_hits[i] && g_pad_hits[i]->down ? '0' + i : '.';
+			held[n] = 0;
+			chrome_log("    chrome: hidden bits %d, pad %s, sticks %s%s, held [%s]", overlay_pad_hidden(), on ? "on" : "off",
+			           tv->sl_active ? "L" : "-", tv->sr_active ? "R" : "-", tv->on ? held : "-");
+			(void)said_eye;
 		}
 	}
 	if (g_pad_layer && !g_pad_layer.hidden) [g_pad_layer sync];   /* the buttons' boxes, a live stick's reach */
@@ -401,8 +450,13 @@ void ios_ui_chrome_install(void) {
 	if (off && off[0] == '0' && off[1] == '\0') return;
 	if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_chrome_install(); }); return; }
 	UIWindow *win = chrome_window();
-	if (!win) return;   /* nothing to hang from yet: the ImGui chrome keeps the slot */
+	if (!win) { chrome_log("    chrome: no window to install into (the ImGui chrome keeps the phone)"); return;   /* nothing to hang from yet */ }
 	g_win = win;
+	{
+		const char *np = getenv("RECOMP_NATIVE_PAD");   /* =0: the native pad never comes up (the ImGui pad and the finger path again) */
+		g_pad_disabled = np && np[0] == '0' && np[1] == '\0';
+	}
+	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds, pad %s)", win, win.bounds.size.width, win.bounds.size.height, g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
 
 	g_center = [[ChromeCenter alloc] init];   /* kept: UIKit's targets and delegates don't retain */
 	g_eye = [[UIButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */

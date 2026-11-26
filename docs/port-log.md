@@ -274,3 +274,31 @@ with -- neither picture nor touch can drift from it):
 The dynamic sticks' logic -- pockets, tap-pass-through, hold and drag
 thresholds -- is untouched in window.c; only what the pad *looks like*
 and *answers with at the glass* went native.
+
+### Step 28 — the broken pad round: instrument, and give the pad a floor
+
+test17 came back from the phone wrong all over: a haptic on every
+touch, no controls drawn, the game's own touches and the pull dead.
+The session.log had nothing to say about any of it -- nothing of the
+chrome had ever learned to speak -- so this round makes the phone able
+to tell the story itself:
+
+- Every chrome event logs (the `chrome:` lines, into session.log):
+  the install (which window, what bounds, whether RECOMP_NATIVE_PAD
+  turned the pad off), every pad layout (each button's frame and
+  shape), each button's press/release/cancel with its point, every
+  pull's start, every haptic with its cause, and -- once a second --
+  one state line: overlay_pad_hidden's *bitmask of reasons* (1 the
+  menu, 2 the intro, 4 the bar, 8 a popup -- it used to be a blind
+  yes/no), the pad on/off, which sticks live, which buttons think
+  they're held.
+- RECOMP_PAD_DEBUG=1 rides in the pack this round, so the log also
+  shows each finger's routing (whose touch went where, one line per
+  finger event) -- the one thing the chrome's own lines can't see:
+  whether SDL sees the fingers at all.
+- RECOMP_NATIVE_PAD=0 (env.txt, no rebuild needed) stands the whole
+  native pad down into exactly the old behaviour: pad_draw returns
+  only while the native pad actually draws (its own ios_ui_chrome_
+  pad_on, not the chrome's blanket word), so ImGui's pad and the
+  finger path own the glass again. RECOMP_NATIVE_CHROME=0 still
+  takes the eye, the pull and the toasts with it.
