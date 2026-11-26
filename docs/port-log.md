@@ -607,3 +607,24 @@ Three from the phone's report, all clean:
   panels, the pause card, the intro strip.
 - The strip panels' radio dots became the system's own checkmark
   mark (drawn by hand -- SF Symbols never rendered here).
+
+### Step 44 — test34 lifecycle, input and usability review
+
+The missing eye was explained by installation before SDL's GPU claim: SDL
+replaces its root UIView afterward and covers the early window children.
+Install now uses SDL's exact UIWindow after that replacement, with one
+pass-through chrome container above the game. Earlier symbol/background
+changes did not fix this ordering.
+
+The portrait-shaped surface visible in IMG_6209 is reconciled against the
+actual landscape window at the UIView and CAMetalLayer level, before and
+after event pumping, including while settings are open. Pad artwork rejects
+mismatched dimensions instead of stretching them.
+
+The full changes, findings, validation and device-test limit are recorded
+in `docs/ios-ui-test34-review.md`. They include complete layout publication,
+atomic pad input, stationary holds, cancellation, scrolling menus, corrected
+action lifetimes, reusable settings cells, native settings state integration,
+dialog ownership and small cached control images instead of full-screen
+Retina repaints. Sanitized tests cover 96 layouts and 200,000 concurrent
+input publications. This Windows host cannot verify real UIKit rendering.

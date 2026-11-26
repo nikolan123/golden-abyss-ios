@@ -46,7 +46,7 @@ typedef struct {
 
 typedef struct {
 	int on;             /* the pad is in use this frame */
-	float w, h;         /* the pixel size it was laid out for */
+	float w, h;         /* the window point size it was laid out for */
 	float scale;        /* the player's size setting, 1.0 = 100% */
 
 	float sl_x, sl_y, sl_r;   /* the left stick's base and reach */
@@ -67,6 +67,7 @@ void touchpad_layout_for(float w, float h);   /* overlay.cpp draws this; never n
 float touchpad_eye_x(void);                   /* the eye's corner x: valid with the pad off too */
 int touchpad_on(void);
 void touchpad_set_on(int on);
+void touchpad_cancel_all(void); /* UI thread: release every screen button, stick and pending hold */
 int touchpad_scale(void);                 /* percent, 60..160 */
 void touchpad_set_scale(int percent);
 int touchpad_mirror(void);

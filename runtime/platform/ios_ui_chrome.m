@@ -1,23 +1,10 @@
-/* ios_ui_chrome.m -- the phone's chrome as UIKit's own: the controls eye at the top-left corner
- * (its slot exactly window.c's tp_layout: the leftmost margin, beside the shoulder pill the layout
- * stands off by its 46 points + the 8-point gap -- "always at that leftmost spot"), a pull from the
- * top edge that brings the menu bar down (a real recognizer over the same touches: the game's own
- * keep flowing, only the pull is ours), and the toasts, the little cards at the top right.
- *
- * Why UIKit and not SwiftUI: this build cross-compiles from Windows with a C/C++/Objective-C
- * toolchain -- no Swift frontend travels with it (no swiftc, and a SwiftUI app wants a Swift
- * runtime under it). Objective-C is UIKit's own language anyway: the eye is a UIButton, the pull
- * a UIGestureRecognizer, the toasts animated UIViews, every one of them a native path that never
- * touches the game's frame. The host loop in build.py compiles this with no -fobjc-arc, so every
- * view here is born alloc'd and released once its superview owns it (manual memory, ARC's rules
- * spelled out by hand); the two objects that live on (ChromeCenter, the display link's target)
- * are installed once and never torn down -- the app's own lifetime is their pool.
- * The escape hatch: RECOMP_NATIVE_CHROME=0 installs nothing; the ImGui-built eye, pull and toasts
- * (overlay.cpp) keep the phone as it was. */
+/* UIKit chrome above SDL's final Metal view. All view/layout/input mutation is main-thread
+ * only. No raw layer is attached to the UIWindow and no game thread calls UIKit. */
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <UIKit/UIGestureRecognizerSubclass.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
+#import <Metal/Metal.h>
 #include <stdlib.h>
 #include <math.h>
 #include "../ui/touchpad.h"   /* runtime/ui/touchpad.h: the one true layout -- tp_layout's own TpVisual */
@@ -27,6 +14,8 @@ extern int  touchpad_on(void); extern void touchpad_set_on(int on);   /* (touchp
 extern void overlay_toast_titled(const char *title, const char *body, double seconds);
 extern void overlay_bar_open(void);
 extern int  overlay_is_open(void);
+extern int overlay_native_settings_wanted(void);
+extern int overlay_native_settings_page(void);
 extern int  overlay_owns_point(float x, float y);
 extern int  overlay_pad_hidden(void);   /* overlay.cpp: the bar/menus/a dialog over the picture -- the pad draws no pixels then */
 extern void touchpad_native_press(int which);    /* window.c: the same state a finger on the glass would set */
@@ -44,6 +33,7 @@ extern int  overlay_game_paused(void); extern void overlay_set_paused(int on); e
 extern float overlay_volume(void); extern void overlay_set_volume(float v);
 extern int  overlay_frame_rate_wanted(void); extern void overlay_frame_rate_request(int fr); extern int overlay_frame_rate_offered(void);
 extern void overlay_request_quit(void);
+extern int overlay_quit_confirm(void);
 extern int  overlay_stats_level(void); extern void overlay_set_stats(int level);
 extern void overlay_show_controls_page(void);
 /* Step 39: the settings center, the OSD, the pause card, the intro strip (overlay.cpp's own handles) */
@@ -65,17 +55,14 @@ extern const char *settings_str(const char *key, const char *dflt, char *buf, in
 extern void settings_set_str(const char *key, const char *value);
 
 static UIWindow      *g_win;
-static UIView        *g_host;        /* where the chrome lives: the root view controller's view (the same view SDL's Metal content lives in; added after, composited and hit-tested above) */
+static UIView        *g_host;        /* pass-through window child above SDL's final root view */
 static UIButton     *g_eye;          /* owned by the window (installed once, never removed) */
 static UIButton     *g_pull_pill;    /* the top-centre handle: a tap brings the strip down (a swipe belongs to iOS's own top edge) */
 static UIView       *g_toast_host;   /* the corner the toasts stack into, owned the same way */
 static UIStackView  *g_toast_stack;  /* the toasts, newest on top, the oldest past three */
 static int           g_installed;    /* ios_ui_chrome_install ran: everything's in place */
 static int           g_eye_on = -1;  /* what the eye last drew: the menu's toggle must reach it too */
-static int           g_pad_hidden = -1;   /* what the pad last showed under: 0 over the game, 1 under a menu, set hidden to match */
 static int           g_pad_disabled;      /* RECOMP_NATIVE_PAD=0: the native pad stands down (the ImGui pad draws, the finger path owns the taps) */
-int g_pad_draws;                          /* how many times the canvas has actually drawn (the tick's line says it) */
-static CALayer       *g_top_layer;        /* the same pad image as a raw CALayer above every view layer: the most primitive display iOS has (Step 34's differential) */
 
 /* while the chrome is installed this is the pad's own word: overlay.cpp gates pad_draw on it, so
  * a disabled native pad is the *whole* ImGui pad exactly as before, not a blank screen */
@@ -91,14 +78,39 @@ static void chrome_log(const char *fmt, ...) {
 	fputc('\n', stderr);
 	va_end(ap);
 }
-static double chrome_now(void) { return (double)(int64_t)(CFAbsoluteTimeGetCurrent() + 978307200.0); }   /* the game's own clock: unix seconds */
+static double chrome_now(void) { return CACurrentMediaTime(); }
 static UIColor *rgba(int r, int g, int b, float a);   /* defined below the pad section: the glyphs ask for it first */
 static UIVisualEffectView *blur_fill(UIView *host, UIBlurEffectStyle st);   /* the frosted material (the settings center defines it) */
 
+/* A transparent container whose empty areas never swallow SDL/game touches. */
+@interface ChromeHost : UIView
+@end
+@implementation ChromeHost
+- (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:p withEvent:event];
+    return hit == self ? nil : hit;
+}
+@end
+
+/* The artwork can stay modest while the button remains a 44-point touch target. */
+@interface ChromeButton : UIButton
+@end
+@implementation ChromeButton
+- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)event {
+    (void)event;
+    const CGFloat dx = fmax(0, (44 - self.bounds.size.width) / 2);
+    const CGFloat dy = fmax(0, (44 - self.bounds.size.height) / 2);
+    return CGRectContainsPoint(CGRectInset(self.bounds, -dx, -dy), p);
+}
+@end
+
+static CGRect chrome_safe_rect(void) {
+    return UIEdgeInsetsInsetRect(g_host.bounds, g_win.safeAreaInsets);
+}
+static void chrome_layout(void);
+
 /* ---- the eye ---------------------------------------------------------------------------- */
-/* the chrome's glyphs, drawn by hand: SF Symbols never showed here (the eye rendered as a bare dark
- * chip -- "the circle thing that does absolutely nothing", and test30's pill had no chevron in it), so
- * nothing depends on them anymore: an eye is two arcs and a dot, a chevron two lines, our own paths */
+/* Small vector glyphs rendered into images; their visibility comes from correct view ordering. */
 static UIImage *glyph(NSString *kind, CGFloat w, CGFloat h, UIColor *stroke) {
 	UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(w, h)];
 	UIImage *im = [r imageWithActions:^(UIGraphicsImageRendererContext *rc) {
@@ -127,7 +139,7 @@ static UIImage *glyph(NSString *kind, CGFloat w, CGFloat h, UIColor *stroke) {
 			[p addLineToPoint:CGPointMake(w * 0.5f, h * 0.66f)];
 			[p addLineToPoint:CGPointMake(w * 0.74f, h * 0.40f)];
 			[p stroke];
-		} else if ([kind isEqualToString:@"check"]) {   /* the system's own mark, drawn (SF Symbols never rendered here) */
+		} else if ([kind isEqualToString:@"check"]) {   /* a checkmark */
 			UIBezierPath *p = [UIBezierPath bezierPath];
 			[p moveToPoint:CGPointMake(w * 0.18f, h * 0.54f)];
 			[p addLineToPoint:CGPointMake(w * 0.42f, h * 0.80f)];
@@ -144,29 +156,19 @@ static void eye_look(void) {
 	g_eye_on = on;
 	UIImage *img = glyph(on ? @"eye" : @"eye.slash", 24.0f, 15.0f,
 	                      on ? rgba(235, 240, 255, 0.92f) : rgba(160, 166, 180, 0.85f));
-	[g_eye setImage:img forState:UIControlStateNormal];
+	[g_eye setImage:[img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
+    g_eye.accessibilityLabel = on ? @"Hide on-screen controls" : @"Show on-screen controls";
+    g_eye.accessibilityValue = on ? @"On" : @"Off";
+    g_eye.selected = on != 0;
 	g_eye.backgroundColor = [UIColor colorWithWhite:0.13f alpha:(on ? 0.72f : 0.52f)];
 }
 
 /* ---- the pad: UIKit's own buttons, and the picture drawn ---------------------------------- */
 static int bar_visible(void);   /* the native strip's own state, asked by the pad's gates below */
-/* Two halves, one layout (tp_layout's TpVisual, the same numbers window.c hit-tests with):
- *
- * PadBtn -- the invisible touch area of one control. It draws nothing (the layer below holds the
- * pixels); it *is* the touch: pointInside: answers the exact test tp_hit makes (a pill's box, a
- * button's 1.18-radius circle), stepping aside wherever ImGui owns the point (the bar's menus, the
- * game's dialogs -- the finger falls through to SDL and the menu behaves exactly as before). A touch
- * begins the press (window.c's own bit and down flag, its native path), ends it, and the taptic
- * engine answers both; a finger that slides off keeps its press, as it always had.
- *
- * PadLayer -- the pad's whole picture, Core Graphics drawing the same shapes and colours the ImGui
- * card drew (the same fills, rings, glyphs and weights), dirty-rect synced per frame by the display
- * link: the controls' boxes while the pad is on, a wider box around a live stick so the knob can
- * slide, all empty the moment the pad (or the picture under a menu) goes. */
+/* Native touch areas and artwork use the same completed TpVisual, in window points. */
 @interface PadBtn : UIView {
  @public
 	int idx;              /* TpButton's index: window.c speaks `which - 10` */
-	float hw, hh, rb;     /* the shape: a pill's half-size, or rb = a circle's 1.18 box */
 	int pill;
 	int down;             /* this touch has the button */
 }
@@ -180,12 +182,12 @@ static int bar_visible(void);   /* the native strip's own state, asked by the pa
 	if (overlay_pad_hidden()) return NO;   /* the bar's down, a menu, a dialog (Step 34's bits): whatever made the picture stand down stands its touches down -- the tabs sit on the pills' zone, and a menu must be pressable */
 	{	/* wherever ImGui owns the point, the finger is its (a menu over the shoulders, a dialog):
 		 * fall through as though this control were not here -- the exact behaviour the tap used to have.
-		 * And the window's low 14 points are navigation's own, always: a pull or a tap there is never a button */
+		 * The native Menu button handles navigation independently. */
 		const CGPoint wp = [self convertPoint:p toView:nil];
-		if (wp.y < 14.0f) return NO;
+		/* The native Menu button owns navigation; the rest remains playable. */
 		if (overlay_owns_point(wp.x, wp.y)) return NO;
 	}
-	if (pill) return CGRectContainsPoint(self.bounds, p);   /* UIKit asks this one question and trusts it: a YES outside the bounds is a YES for the whole window -- test17's whole-glass swallow */
+	if (pill) return CGRectContainsPoint(CGRectInset(self.bounds, -fmax(0, (44 - self.bounds.size.width) / 2), -fmax(0, (44 - self.bounds.size.height) / 2)), p);
 	const float cxr = self.bounds.size.width * 0.5f, cyr = self.bounds.size.height * 0.5f;
 	return hypotf(p.x - cxr, p.y - cyr) <= cxr;   /* the 1.18-radius circle, in the box the frame is */
 }
@@ -239,28 +241,14 @@ static void pad_glyph_cg(CGContextRef c, int label, float cx, float cy, float r,
 	CGContextSetLineWidth(c, t);
 }
 
-/* the pad's picture, as one painter's function: everything tp_layout laid out, the very shapes and
- * weights the ImGui card drew. The canvas question of Step 30 (drawRect never ran once, however
- * many rects were marked) is answered by not asking it anything: this paints into an offscreen
- * image whenever the pad's state actually changed, and a plain UIImageView carries the pixels --
- * the same delivery as every other UIKit control on the screen, no drawRect in the path at all. */
-static void pad_paint_cg(CGContextRef c, const TpVisual *tv, CGSize size) {
-	{	/* RECOMP_PAD_CANVAS_DEBUG=1 turns the old amber probe back on; test24 proved the pixels ride,
-	 * so it stays off unless asked */
-		static int want = -1;
-		if (want < 0) { const char *e = getenv("RECOMP_PAD_CANVAS_DEBUG"); want = e && e[0] == '1' && e[1] == '\0'; }
-		if (want) {
-			CGContextSetFillColorWithColor(c, [UIColor colorWithRed:1.0f green:0.73f blue:0.28f alpha:0.85f].CGColor);
-			CGContextFillRect(c, CGRectMake(size.width * 0.5f - 16.0f, 44.0f, 32.0f, 32.0f));
-		}
-	}
+/* Paint one button or stick into its own cached image. Visibility is decided once by sync. */
+static void pad_paint_cg(CGContextRef c, const TpVisual *tv) {
 	const float a = (tv->opacity < 0 ? 0 : tv->opacity > 100 ? 100 : tv->opacity) / 100.0f;
 	UIColor *fill = rgba(12, 14, 18, 0.55f * a), *ring = rgba(235, 240, 255, 0.75f * a);
 	UIColor *text = rgba(235, 240, 255, 0.90f * a), *hot = rgba(255, 255, 255, a);
 	UIColor *base = rgba(10, 12, 16, 0.30f * a), *knob_fill = rgba(235, 240, 255, 0.22f * a);
 
-	const int hidden = overlay_pad_hidden() != 0;
-	if (!hidden && (tv->sl_active || tv->sr_active)) {   /* the sticks, only while a thumb is on one */
+	if (tv->sl_active || tv->sr_active) {   /* the sticks, only while a thumb is on one */
 		CGContextSetLineWidth(c, 1.5f);
 		if (tv->sl_active) {
 			CGContextSetFillColorWithColor(c, base.CGColor); CGContextSetStrokeColorWithColor(c, ring.CGColor);
@@ -281,7 +269,6 @@ static void pad_paint_cg(CGContextRef c, const TpVisual *tv, CGSize size) {
 			CGContextStrokeEllipseInRect(c, CGRectMake(tv->sr_kx - kr, tv->sr_ky - kr, 2 * kr, 2 * kr));
 		}
 	}
-	if (hidden) return;
 	for (int i = 0; i < tv->nb; i++) {   /* the buttons: the same fill, ring and glyph, down lighting the pressed one */
 		const TpButton *b = &tv->b[i];
 		UIColor *cf = b->down ? rgba(255, 255, 255, 0.30f * a) : fill;
@@ -310,83 +297,80 @@ static void pad_paint_cg(CGContextRef c, const TpVisual *tv, CGSize size) {
 	}
 }
 
-/* what the picture must repaint for: every number of the layout and state a pixel depends on */
-struct PadSig {
-	int nb, opacity, hidden, down[8];
-	int sl_a; float sl_x, sl_y, sl_kx, sl_ky, sl_r;
-	int sr_a; float sr_x, sr_y, sr_kx, sr_ky, sr_r;
-	float w, h;
-};
-
+/* Each control owns a small cached image. Moving a stick must not allocate/rasterize a
+ * full 2796x1290 canvas every refresh; unchanged buttons cost no image work at all. */
 @interface PadLayer : UIView {
- @public
-	UIImageView *imgv;      /* the picture's carrier: a plain image view, no drawRect anywhere */
-	struct PadSig sig;      /* what was painted last: equal means nothing to do */
-	BOOL made;
+    CALayer *pictures[10];
+    TpVisual previous[10];
+    CGFloat imageScale[10];
+    BOOL valid[10];
 }
+- (void)sync;
 @end
-
 @implementation PadLayer
+- (void)paint:(TpVisual)visual inRect:(CGRect)rect slot:(int)slot scale:(CGFloat)scale {
+    if (!pictures[slot]) {
+        pictures[slot] = [CALayer layer]; [self.layer addSublayer:pictures[slot]];
+    }
+    pictures[slot].hidden = NO;
+    if (valid[slot] && !memcmp(&visual, &previous[slot], sizeof visual) && imageScale[slot] == scale) return;
+    previous[slot] = visual; imageScale[slot] = scale; valid[slot] = YES;
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.opaque = NO; format.scale = scale;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:rect.size format:format];
+    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGContextTranslateCTM(context.CGContext, -rect.origin.x, -rect.origin.y);
+        pad_paint_cg(context.CGContext, &visual);
+    }];
+    pictures[slot].frame = rect; pictures[slot].contentsScale = scale;
+    pictures[slot].contents = (id)image.CGImage;
+    [renderer release];
+}
 - (void)sync {
-	/* test25: sync runs every tick, hidden or not. The tick's own `hidden` gate is what kept test24's
-	 * screenshot honest by accident: a menu opened, sync stopped, and the raw layer went on showing the
-	 * last full-pad paint -- one made at the torn moment right after tp_layout's re-write of the pad
-	 * struct, all mis-shaped shapes, never healed. The signature decides whether anything repaints;
-	 * a bad read heals one tick later, and the hidden bit is part of the signature, so opening the
-	 * menu repaints (empty) at once. */
-	const TpVisual *tv = touchpad_visuals();
-	if (!self.window) return;
-	const int show = tv->on && tv->nb;
-	if (!show) {   /* the pad itself off: both carriers down at once (the raw layer is nobody's subview -- it hides here too) */
-		sig = (struct PadSig){0};
-		if (made) imgv.hidden = YES;
-		if (g_top_layer) g_top_layer.hidden = YES;
-		return;
-	}
-	if (!made) {   /* the carrier itself: full-size, locked to our bounds, never a touch */
-		imgv = [[UIImageView alloc] initWithFrame:self.bounds];
-		imgv.userInteractionEnabled = NO;
-		imgv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-		[self addSubview:imgv];
-		[imgv release];
-		made = YES;
-		chrome_log("    chrome: canvas made (%.0fx%.0f on the window, scale %.1fx)", self.bounds.size.width, self.bounds.size.height, self.window.screen.scale);
-	}
-	struct PadSig s;
-	memset(&s, 0, sizeof s);
-	s.nb = tv->nb; s.opacity = tv->opacity; s.hidden = overlay_pad_hidden() != 0 || bar_visible() != 0;
-	s.w = self.bounds.size.width; s.h = self.bounds.size.height;
-	for (int i = 0; i < tv->nb && i < 8; i++) s.down[i] = tv->b[i].down;
-	s.sl_a = tv->sl_active; s.sl_x = tv->sl_x; s.sl_y = tv->sl_y; s.sl_kx = tv->sl_kx; s.sl_ky = tv->sl_ky; s.sl_r = tv->sl_r;
-	s.sr_a = tv->sr_active; s.sr_x = tv->sr_x; s.sr_y = tv->sr_y; s.sr_kx = tv->sr_kx; s.sr_ky = tv->sr_ky; s.sr_r = tv->sr_r;
-	if (!memcmp(&s, &sig, sizeof s)) return;   /* nothing the least pixel depends on has changed */
-	sig = s;
-	const CGSize sz = self.bounds.size;
-	UIGraphicsImageRendererFormat *fmt = [[UIGraphicsImageRendererFormat alloc] init];
-	const float scale = self.window.screen.scale > 0 ? self.window.screen.scale : 3.0f;
-	fmt.scale = scale;
-	UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:sz format:fmt];
-	UIImage *im = [r imageWithActions:^(UIGraphicsImageRendererContext *rc) { pad_paint_cg(rc.CGContext, tv, sz); }];
-	[fmt release]; [r release];
-	imgv.image = im;
-	if (!g_top_layer) {   /* the raw layer, placed after every subview's layer: over everything, no view machinery at all */
-		g_top_layer = [CALayer new];
-		g_top_layer.frame = g_host.bounds;
-		[g_host.layer addSublayer:g_top_layer];
-		[g_top_layer release];   /* the window's layer owns it */
-	}
-	g_top_layer.frame = self.bounds;
-	g_top_layer.contents = (__bridge id)im.CGImage;
-	imgv.hidden = s.hidden != 0;
-	g_top_layer.hidden = s.hidden != 0;
-	g_pad_draws++;
-	if (g_pad_draws == 1) chrome_log("    chrome: canvas painted (%.0fx%.0f, scale %.1f, opacity %.2f)", sz.width, sz.height, scale, tv->opacity / 100.0f);
+    const TpVisual snapshot = *touchpad_visuals();
+    const BOOL show = snapshot.on && snapshot.nb > 0 && !overlay_pad_hidden() && !bar_visible();
+    self.hidden = !show;
+    if (!show || !self.window) return;
+    const CGSize size = self.bounds.size;
+    if (fabs(snapshot.w - size.width) > 1 || fabs(snapshot.h - size.height) > 1) {
+        self.hidden = YES; memset(valid, 0, sizeof valid); return;
+    }
+    const CGFloat scale = self.window.screen.scale;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    for (int i = 0; i < 8; i++) {
+        if (i >= snapshot.nb) { pictures[i].hidden = YES; continue; }
+        TpVisual visual = {0}; visual.on = 1; visual.opacity = snapshot.opacity;
+        visual.nb = 1; visual.b[0] = snapshot.b[i];
+        const TpButton b = visual.b[0];
+        const CGFloat hw = b.pill ? b.hw : b.r, hh = b.pill ? b.hh : b.r;
+        [self paint:visual inRect:CGRectMake(b.x - hw - 2, b.y - hh - 2, hw * 2 + 4, hh * 2 + 4) slot:i scale:scale];
+    }
+    for (int stick = 0; stick < 2; stick++) {
+        const int active = stick ? snapshot.sr_active : snapshot.sl_active;
+        if (!active) { pictures[8 + stick].hidden = YES; continue; }
+        const float x = stick ? snapshot.sr_x : snapshot.sl_x, y = stick ? snapshot.sr_y : snapshot.sl_y;
+        const float reach = stick ? snapshot.sr_r : snapshot.sl_r;
+        float dx = (stick ? snapshot.sr_kx : snapshot.sl_kx) - x;
+        float dy = (stick ? snapshot.sr_ky : snapshot.sl_ky) - y;
+        const float length = hypotf(dx, dy);
+        if (length > reach && length > 0) { dx *= reach / length; dy *= reach / length; }
+        TpVisual visual = {0}; visual.on = 1; visual.opacity = snapshot.opacity;
+        visual.sl_active = 1; visual.sl_x = x; visual.sl_y = y; visual.sl_r = reach;
+        visual.sl_kx = x + dx; visual.sl_ky = y + dy;
+        const CGFloat extent = reach * 1.42 + 2; /* base + fully deflected knob, including stroke */
+        [self paint:visual inRect:CGRectMake(x - extent, y - extent, extent * 2, extent * 2) slot:8 + stick scale:scale];
+    }
+    [CATransaction commit];
 }
 @end
 
-static PadLayer *g_pad_layer;        /* the pad's picture, one full-screen canvas in sync with tp_layout */
+static PadLayer *g_pad_layer;        /* control-sized cached artwork, synchronized with tp_layout */
 static PadBtn   *g_pad_hits[8];       /* its touch areas, positioned from the same TpVisual */
 static UIImpactFeedbackGenerator *g_hap[3];   /* light / medium / soft, prepared as they're first asked */
+
+void ios_ui_chrome_cancel_controls(void) {
+    for (int i = 0; i < 8; i++) if (g_pad_hits[i]) g_pad_hits[i]->down = 0;
+}
 
 /* the taptic engine's answer: 0 light (a button, the eye, a pull), 1 medium (the shoulders), 2 soft
  * (a thumb's hold becoming a stick). Thread-safe: whatever calls it, the tap happens on the main */
@@ -394,7 +378,6 @@ void ios_ui_haptic(int kind) {
 	if (!g_installed) return;
 	if (kind < 0 || kind > 2) kind = 0;
 	if (![NSThread isMainThread]) { const int k = kind; dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_haptic(k); }); return; }
-	chrome_log("    chrome: haptic %d (%s)", kind, kind == 2 ? "a stick spawned" : kind == 1 ? "a shoulder" : "a button, the eye, a pull");
 	if (!g_hap[kind]) {
 		g_hap[kind] = [[UIImpactFeedbackGenerator alloc] initWithStyle:(kind == 1 ? UIImpactFeedbackStyleMedium : kind == 2 ? UIImpactFeedbackStyleSoft : UIImpactFeedbackStyleLight)];
 		[g_hap[kind] prepare];
@@ -411,23 +394,46 @@ void ios_ui_haptic(int kind) {
 static UIView *g_bar;                /* the strip itself */
 static UIButton *g_bar_tab[3];      /* Game / Display / Controls */
 static UIView *g_shield;             /* tap-anywhere-to-close: one tap, the game never sees it */
+static UIScrollView *g_panel_scroll;
+static UIView *g_panel_content;
 static UIView *g_panel;              /* the open panel (its rows rebuilt per state change) */
 static int g_panel_tab = -1;         /* which panel is open (-1: none) */
-static NSMutableArray *g_panel_keep;   /* the panel's action holders, swept on each rebuild */
 static int g_bar_shown;              /* the strip is down (its own slide state) */
 static double g_bar_last;            /* the last moment the strip was touched */
 static UIView *g_rows;               /* where panel primitives add (the strip's panel, or the settings center's page) */
-static NSMutableArray *g_keep;       /* the array BN drops its holders into (the strip's, or the center's) */
 
+/* UIControl does not retain targets. Associate each action with its own owner instead of
+ * a global array: rebuilding a panel must never delete the bar's or page tabs' targets. */
 @interface BN : NSObject { @public void (^b)(void); }
-+ (id)act:(void (^)(void))blk;
 - (void)fire;
 @end
 @implementation BN
 - (void)dealloc { [b release]; [super dealloc]; }
-+ (id)act:(void (^)(void))blk { BN *n = [[BN alloc] init]; n->b = [blk copy]; [g_keep addObject:n]; return [n autorelease]; }
-- (void)fire { self->b(); }
+- (void)fire {
+    /* An action may rebuild/remove its own control. Keep the executing block alive. */
+    void (^run)(void) = [b copy];
+    run(); [run release];
+}
 @end
+static char action_key;
+static BN *action_for(id owner, void (^block)(void)) {
+    NSMutableArray *actions = objc_getAssociatedObject(owner, &action_key);
+    if (!actions) {
+        actions = [NSMutableArray array];
+        objc_setAssociatedObject(owner, &action_key, actions, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    BN *action = [[[BN alloc] init] autorelease];
+    action->b = [block copy]; [actions addObject:action];
+    return action;
+}
+static void control_on(UIControl *control, UIControlEvents events, void (^block)(void)) {
+    [control addTarget:action_for(control, block) action:@selector(fire) forControlEvents:events];
+}
+static void tap_on(UIView *view, void (^block)(void)) {
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] init];
+    [tap addTarget:action_for(tap, block) action:@selector(fire)];
+    [view addGestureRecognizer:tap]; [tap release];
+}
 
 /* the strip's colours and type, one place */
 static UIFont *bar_row_font(void) { return [UIFont systemFontOfSize:14.5f]; }
@@ -446,7 +452,7 @@ static UIView *panel_line(CGRect f) {
 	[g_rows addSubview:v]; [v release];
 	return v;
 }
-static UIView *panel_dot(CGRect f) {   /* the row's mark: the system's own check, drawn (SF Symbols never rendered here) */
+static UIView *panel_dot(CGRect f) {   /* selected row */
 	UIImageView *v = [[UIImageView alloc] initWithFrame:CGRectMake(f.origin.x - 6.0f, f.origin.y - 4.0f, 14.0f, 14.0f)];
 	v.image = glyph(@"check", 14.0f, 14.0f, rgba(240, 192, 96, 1.0f));
 	[g_rows addSubview:v]; [v release];
@@ -472,16 +478,15 @@ static UIButton *panel_button(CGRect f, NSString *title) {
 				[rgba(255, 255, 255, 0.10f) setFill]; [p fill];
 			}];
 			[r release];
-			hi = [tile resizableImageWithCapInsets:UIEdgeInsetsMake(6, 6, 6, 6)];
+			hi = [[tile resizableImageWithCapInsets:UIEdgeInsetsMake(6, 6, 6, 6)] retain];
 		}
 		[b setBackgroundImage:hi forState:UIControlStateHighlighted];
 	}
 	[g_rows addSubview:b];
 	return b;
 }
-static void panel_fire_on_highlight(UIButton *b, void (^blk)(void)) {   /* the row's press: the block retires with g_panel_keep */
-	BN *n = [BN act:blk];
-	[b addTarget:n action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+static void panel_fire_on_highlight(UIButton *b, void (^blk)(void)) {   /* the row owns its action */
+	control_on(b, UIControlEventTouchUpInside, blk);
 }
 
 /* the panel's three contents -- the phone's own rows, the same actions the ImGui menus took */
@@ -490,9 +495,9 @@ static void bar_up_close_all(void);
 static void bar_make(void);
 void ios_ui_settings_open(int tab);   /* the full menu, native (below) */
 static CGFloat panel_rows(int tab) {
-	g_rows = g_panel; g_keep = g_panel_keep;
+	g_rows = g_panel_content;
 	CGFloat y = 6;
-	const CGFloat row = 34.0f, inset = 14.0f;
+	const CGFloat row = 44.0f, inset = 14.0f;
 	const CGRect vb = g_panel.bounds;
 	UIButton *b;
 	if (tab == 0) {   /* Game */
@@ -505,17 +510,17 @@ static CGFloat panel_rows(int tab) {
 		{	/* Volume: the label, the slider, the live value */
 			UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(inset, y + 7, 64, 19)];
 			l.text = @"Volume"; l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
-			[g_panel addSubview:l]; [l release];
+			[g_rows addSubview:l]; [l release];
 			UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 56, y + 7, 44, 19)];
 			vl.font = bar_row_font(); vl.textColor = rgba(150, 156, 172, 1.0f); vl.text = [NSString stringWithFormat:@"%.0f%%", overlay_volume() * 100.0f];
-			[g_panel addSubview:vl]; [vl release];
+			[g_rows addSubview:vl]; [vl release];
 			UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(inset + 70, y + 3, vb.size.width - inset - 74 - 56, 28)];
 			sl.minimumValue = 0.0f; sl.maximumValue = 1.0f; sl.value = overlay_volume();
 			sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
-			[g_panel addSubview:sl];
+			[g_rows addSubview:sl];
 			/* no ARC: __block keeps the slider's blocks from retaining the slider that targets them */
 	__block UISlider *wsl = sl; __block UILabel *wvl = vl;
-	[sl addTarget:[BN act:^{ overlay_set_volume(wsl.value); wvl.text = [NSString stringWithFormat:@"%.0f%%", wsl.value * 100.0f]; }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+	control_on(sl, UIControlEventValueChanged, ^{ overlay_set_volume(wsl.value); wvl.text = [NSString stringWithFormat:@"%.0f%%", wsl.value * 100.0f]; });
 			[sl release];
 		}
 		y += row + 4;
@@ -535,7 +540,7 @@ static CGFloat panel_rows(int tab) {
 		}
 		panel_line(CGRectMake(0, y + 2, vb.size.width, 1)); y += 10;
 		b = panel_button(CGRectMake(0, y, vb.size.width, row), @"Quit game");
-		panel_fire_on_highlight(b, ^{ overlay_request_quit(); });
+		panel_fire_on_highlight(b, ^{ bar_up_close_all(); overlay_quit_confirm(); });
 		y += row;
 	}
 	if (tab == 1) {   /* Display */
@@ -574,16 +579,16 @@ static CGFloat panel_rows(int tab) {
 			UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 58, y + 8, 44, 18)];
 			st.font = bar_row_font(); st.textColor = on ? rgba(240, 192, 96, 1.0f) : rgba(150, 156, 172, 1.0f);
 			st.text = on ? @"On" : @"Off";
-			[g_panel addSubview:st]; [st release];
+			[g_rows addSubview:st]; [st release];
 			panel_fire_on_highlight(r, ^{ touchpad_set_on(touchpad_on() ? 0 : 1); bar_panel_rebuild(); });
 			y += row;
 		}
 		{	int on = window_touchpad_rstick() != 0;
-			UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), @"Second stick (the lower right corner)");
+			UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), @"Second stick");
 			UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 58, y + 8, 44, 18)];
 			st.font = bar_row_font(); st.textColor = on ? rgba(240, 192, 96, 1.0f) : rgba(150, 156, 172, 1.0f);
 			st.text = on ? @"On" : @"Off";
-			[g_panel addSubview:st]; [st release];
+			[g_rows addSubview:st]; [st release];
 			panel_fire_on_highlight(r, ^{ settings_set_int("touchpad_rstick", window_touchpad_rstick() ? 0 : 1); settings_save(); bar_panel_rebuild(); });
 			y += row;
 		}
@@ -594,41 +599,41 @@ static CGFloat panel_rows(int tab) {
 			vl.font = bar_row_font(); vl.textColor = rgba(150, 156, 172, 1.0f);
 			int v = touchpad_scale();
 			vl.text = [NSString stringWithFormat:@"%d%%", v];
-			[g_panel addSubview:vl]; [vl release];
+			[g_rows addSubview:vl]; [vl release];
 			UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(inset, y + 26, vb.size.width - 2 * inset, 24)];
 			sl.minimumValue = 60; sl.maximumValue = 160; sl.value = v;
 			sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
-			[g_panel addSubview:sl];
+			[g_rows addSubview:sl];
 			__block UISlider *wsl = sl; __block UILabel *wvl = vl;   /* no ARC: keeps the blocks from retaining the slider */
-			[sl addTarget:[BN act:^{ int nv = (int)(wsl.value + 0.5f); wvl.text = [NSString stringWithFormat:@"%d%%", nv]; }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-			[sl addTarget:[BN act:^{ touchpad_set_scale((int)(wsl.value + 0.5f)); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+			control_on(sl, UIControlEventValueChanged, ^{ int nv = (int)(wsl.value + 0.5f); wvl.text = [NSString stringWithFormat:@"%d%%", nv]; });
+			control_on(sl, UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel, ^{ touchpad_set_scale((int)(wsl.value + 0.5f)); });
 			[sl release];
 			y += row + 16;
 		}
 		{	/* Opacity: 10..90 */
-			UILabel *l = panel_head(CGRectMake(inset, y + 8, vb.size.width - 2 * inset - 56, 18), @"See-through controls");
+			UILabel *l = panel_head(CGRectMake(inset, y + 8, vb.size.width - 2 * inset - 56, 18), @"Control opacity");
 			l.font = bar_row_font(); l.textColor = rgba(234, 236, 244, 0.94f);
 			UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 56, y + 8, 44, 18)];
 			vl.font = bar_row_font(); vl.textColor = rgba(150, 156, 172, 1.0f);
 			int v = settings_int("touchpad_opacity", 42);
 			vl.text = [NSString stringWithFormat:@"%d%%", v];
-			[g_panel addSubview:vl]; [vl release];
+			[g_rows addSubview:vl]; [vl release];
 			UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(inset, y + 26, vb.size.width - 2 * inset, 24)];
 			sl.minimumValue = 10; sl.maximumValue = 90; sl.value = v;
 			sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
-			[g_panel addSubview:sl];
+			[g_rows addSubview:sl];
 			__block UISlider *wsl = sl; __block UILabel *wvl = vl;   /* no ARC: keeps the blocks from retaining the slider */
-			[sl addTarget:[BN act:^{ int nv = (int)(wsl.value + 0.5f); wvl.text = [NSString stringWithFormat:@"%d%%", nv]; }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-			[sl addTarget:[BN act:^{ settings_set_int("touchpad_opacity", (int)(wsl.value + 0.5f)); settings_save(); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+			control_on(sl, UIControlEventValueChanged, ^{ int nv = (int)(wsl.value + 0.5f); wvl.text = [NSString stringWithFormat:@"%d%%", nv]; });
+			control_on(sl, UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel, ^{ settings_set_int("touchpad_opacity", (int)(wsl.value + 0.5f)); settings_save(); });
 			[sl release];
 			y += row + 16;
 		}
 		{	bool lh = touchpad_mirror() != 0;
-			UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), @"Left-handed (swap sides)");
+			UIButton *r = panel_button(CGRectMake(0, y, vb.size.width, row), @"Left-handed");
 			UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(vb.size.width - 58, y + 8, 44, 18)];
 			st.font = bar_row_font(); st.textColor = lh ? rgba(240, 192, 96, 1.0f) : rgba(150, 156, 172, 1.0f);
 			st.text = lh ? @"On" : @"Off";
-			[g_panel addSubview:st]; [st release];
+			[g_rows addSubview:st]; [st release];
 			panel_fire_on_highlight(r, ^{ touchpad_set_mirror(touchpad_mirror() ? 0 : 1); bar_panel_rebuild(); });
 			y += row;
 		}
@@ -641,122 +646,100 @@ static CGFloat panel_rows(int tab) {
 }
 
 static void bar_panel_rebuild(void) {
-	if (g_panel_tab < 0) return;
-	[g_panel_keep removeAllObjects];   /* the BN blocks retire with their rows; the panel's blur stays (Step 43) */
-	for (UIView *v in [g_panel subviews]) if (![v isKindOfClass:[UIVisualEffectView class]]) [v removeFromSuperview];
-	const int tab = g_panel_tab;
-	const CGFloat widths[3] = { 250.0f, 250.0f, 300.0f };
-	const CGFloat w = widths[tab];
-	const CGPoint at = g_panel.frame.origin;   /* captured before any size change: setting bounds (as test29 did) slides the top up by half the size delta -- the panel opened at y -10, its header cut by the screen's edge */
-	g_panel.frame = CGRectMake(at.x, at.y, w, 100.0f);   /* frame, never bounds: the top stays at the strip's bottom */
-	const CGFloat h = panel_rows(tab);
-	g_panel.frame = CGRectMake(at.x, at.y, w, h);
+    if (g_panel_tab < 0) return;
+    for (UIView *view in g_panel_content.subviews) [view removeFromSuperview];
+    const CGRect safe = chrome_safe_rect();
+    const CGFloat width = fmin(g_panel_tab == 2 ? 320 : 280, safe.size.width - 16);
+    const CGRect tab = [g_bar_tab[g_panel_tab] convertRect:g_bar_tab[g_panel_tab].bounds toView:g_host];
+    const CGFloat x = fmax(CGRectGetMinX(safe) + 8, fmin(tab.origin.x, CGRectGetMaxX(safe) - width - 8));
+    const CGFloat y = CGRectGetMaxY(g_bar.frame) + 4;
+    g_panel.frame = CGRectMake(x, y, width, 100);
+    g_panel_scroll.frame = g_panel.bounds;
+    g_panel_content.frame = CGRectMake(0, 0, width, 100);
+    const CGFloat content = panel_rows(g_panel_tab);
+    const CGFloat height = fmin(content, fmax(44, CGRectGetMaxY(safe) - y - 8));
+    g_panel.frame = CGRectMake(x, y, width, height);
+    g_panel_scroll.frame = g_panel.bounds;
+    g_panel_scroll.contentSize = CGSizeMake(width, content);
+    g_panel_content.frame = CGRectMake(0, 0, width, content);
+    for (int i = 0; i < 3; i++) g_bar_tab[i].selected = i == g_panel_tab;
 }
-
 static void bar_panel_open(int tab) {
-	g_panel_tab = tab;
-	g_bar_last = chrome_now();
-	UIButton *t = g_bar_tab[tab];
-	CGFloat x = t.frame.origin.x - 4; if (x < 4) x = 4;
-	const CGFloat widths[3] = { 250.0f, 250.0f, 300.0f };
-	if (x + widths[tab] > g_bar.bounds.size.width - 4) x = g_bar.bounds.size.width - widths[tab] - 4;
-	[g_panel setFrame:CGRectMake(x, g_bar.bounds.size.height + 1, widths[tab], 10)];
-	bar_panel_rebuild();
-	g_shield.hidden = NO;
-	g_panel.hidden = NO;
-	ios_ui_haptic(0);   /* the panel's little tick */
+    g_panel_tab = tab; g_bar_last = chrome_now();
+    bar_panel_rebuild(); g_panel.hidden = NO;
+    ios_ui_haptic(0);
 }
 static void bar_panel_close(void) {
-	g_panel_tab = -1;
-	g_panel.hidden = YES;
-	g_shield.hidden = YES;
+    g_panel_tab = -1; g_panel.hidden = YES;
+    for (int i = 0; i < 3; i++) g_bar_tab[i].selected = NO;
 }
 static void bar_up_close_all(void) {
-	if (!g_bar) return;
-	bar_panel_close();
-	g_bar_shown = 0;
-	[UIView animateWithDuration:0.20 animations:^{ CGRect f = g_bar.frame; f.origin.y = -f.size.height; g_bar.frame = f; }];
+    if (!g_bar) return;
+    bar_panel_close(); g_bar_shown = 0; g_shield.hidden = YES;
+    [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        CGRect f = g_bar.frame; f.origin.y = -f.size.height; g_bar.frame = f;
+    } completion:nil];
 }
 void ios_ui_bar_open(void) {
-	if (!g_installed) return;
-	if (overlay_is_open()) return;   /* the menu is up (the settings center or a card): the strip stays out of its way */
-	if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_bar_open(); }); return; }
-	if (!g_bar) bar_make();   /* built the first time it's ever pulled */
-	if (!g_bar) return;
-	g_bar_last = chrome_now();
-	if (!g_bar_shown) {
-		g_bar_shown = 1;
-		[UIView animateWithDuration:0.22 animations:^{ CGRect f = g_bar.frame; f.origin.y = 0; g_bar.frame = f; }];
-		ios_ui_haptic(0);
-	}
+    if (!g_installed) return;
+    if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_bar_open(); }); return; }
+    if (overlay_is_open() || (overlay_pad_hidden() & 8)) return;
+    if (!g_bar) bar_make();
+    overlay_intro_dismiss(); touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
+    g_bar_last = chrome_now();
+    if (!g_bar_shown) {
+        g_bar_shown = 1; g_shield.hidden = NO;
+        [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+            CGRect f = g_bar.frame; f.origin.y = 0; g_bar.frame = f;
+        } completion:nil];
+        ios_ui_haptic(0);
+    }
 }
 static void bar_tab_tapped(int tab) {
-	if (overlay_is_open()) { bar_up_close_all(); return; }   /* the full menu is up: the strip steps out of its way */
-	g_bar_last = chrome_now();
-	if (g_panel_tab == tab) { bar_panel_close(); return; }
-	bar_panel_open(tab);
+    if (overlay_is_open()) { bar_up_close_all(); return; }
+    g_bar_last = chrome_now();
+    if (g_panel_tab == tab) bar_panel_close(); else bar_panel_open(tab);
 }
 static void bar_make(void) {
-	const CGFloat bh = 34.0f;
-	g_panel_keep = [[NSMutableArray alloc] init];   /* the tab buttons use it before anything else exists */
-	g_keep = g_panel_keep;
-	/* the strip: full width, 34 tall, parked above the top until opened; the frosted material (Step 43) */
-	g_bar = [[UIView alloc] initWithFrame:CGRectMake(0, -bh, g_host.bounds.size.width, bh)];
-	g_bar.backgroundColor = [UIColor clearColor];
-	blur_fill(g_bar, UIBlurEffectStyleSystemMaterialDark);
-	g_bar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleBottomMargin;
-	[g_host addSubview:g_bar];
-	[g_bar release];
-	/* its bottom hairline, the card's one edge */
-	{	UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, bh - 1, g_bar.bounds.size.width, 1)];
-		line.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-		line.backgroundColor = rgba(255, 255, 255, 0.10f);
-		[g_bar addSubview:line];
-		[line release];
-	}
-
-	/* the tab buttons: Game / Display / Controls, off the eye's corner (Step 25's slot) */
-	const CGFloat ty = 3;
-	static const char *const tabs[3] = { "Game", "Display", "Controls" };
-	CGFloat tx = 82;   /* the eye's own slot ends at ~70 */
-	for (int i = 0; i < 3; i++) {
-		UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-		b.frame = CGRectMake(tx, ty, 0, 0);   /* sized below, once the titles are set */
-		[b setTitle:[NSString stringWithUTF8String:tabs[i]] forState:UIControlStateNormal];
-		b.titleLabel.font = [UIFont systemFontOfSize:14.5f weight:UIFontWeightMedium];
-		[b setTitleColor:rgba(226, 230, 240, 0.75f) forState:UIControlStateNormal];
-		[b setTitleColor:[UIColor whiteColor] forState:UIControlStateHighlighted | UIControlStateSelected];
-		[b sizeToFit];
-		CGRect f = b.frame; f.size.width += 22; f.size.height = bh - 6; f.origin.y = ty;
-		b.frame = f;
-		const int ti = i;
-		[b addTarget:[BN act:^{ bar_tab_tapped(ti); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-		[g_bar addSubview:b];
-		g_bar_tab[i] = b;
-		tx += f.size.width + 8;
-	}
-	/* the shield: a tap anywhere closes the panel (the game never sees that one tap -- the ImGui menus behaved the same) */
-	g_shield = [[UIView alloc] initWithFrame:g_host.bounds];
-	g_shield.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	g_shield.backgroundColor = [UIColor clearColor];
-	g_shield.hidden = YES;
-	[g_shield addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:[BN act:^{ bar_up_close_all(); }] action:@selector(fire)]];
-	[g_host addSubview:g_shield];
-	[g_shield release];
-	/* the panel: the rounded card under the open tab, the same frosted material */
-	g_panel = [[UIView alloc] initWithFrame:CGRectZero];
-	g_panel.backgroundColor = [UIColor clearColor];
-	blur_fill(g_panel, UIBlurEffectStyleSystemMaterialDark);
-	g_panel.layer.cornerRadius = 10.0f;
-	g_panel.layer.masksToBounds = YES;
-	g_panel.layer.borderColor = rgba(255, 255, 255, 0.10f).CGColor;
-	g_panel.layer.borderWidth = 0.5f;
-	g_panel.hidden = YES;
-	g_panel.userInteractionEnabled = YES;
-	[g_host addSubview:g_panel];
-	[g_panel release];
+    /* Layer order is deliberate: outside-tap shield, bar, scrollable panel. */
+    g_shield = [[UIView alloc] initWithFrame:g_host.bounds];
+    g_shield.backgroundColor = [UIColor colorWithWhite:0 alpha:0.15];
+    g_shield.hidden = YES; tap_on(g_shield, ^{ bar_up_close_all(); });
+    [g_host addSubview:g_shield]; [g_shield release];
+    g_bar = [[UIView alloc] initWithFrame:CGRectMake(0, -44, g_host.bounds.size.width, 44)];
+    blur_fill(g_bar, UIBlurEffectStyleSystemMaterialDark);
+    [g_host addSubview:g_bar]; [g_bar release];
+    const char *tabs[3] = {"Game", "Display", "Controls"};
+    CGFloat x = g_win.safeAreaInsets.left + 8;
+    for (int i = 0; i < 3; i++) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.frame = CGRectMake(x, 0, 100, 44);
+        button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        [button setTitle:[NSString stringWithUTF8String:tabs[i]] forState:UIControlStateNormal];
+        [button setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+        [button setTitleColor:rgba(240, 192, 96, 1) forState:UIControlStateSelected];
+        const int tab = i; control_on(button, UIControlEventTouchUpInside, ^{ bar_tab_tapped(tab); });
+        [g_bar addSubview:button]; g_bar_tab[i] = button; x += 104;
+    }
+    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem]; done.tag = 700;
+    [done setTitle:@"Done" forState:UIControlStateNormal];
+    done.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    done.tintColor = rgba(240, 192, 96, 1);
+    control_on(done, UIControlEventTouchUpInside, ^{ bar_up_close_all(); });
+    [g_bar addSubview:done];
+    g_panel = [[UIView alloc] initWithFrame:CGRectZero];
+    blur_fill(g_panel, UIBlurEffectStyleSystemMaterialDark);
+    g_panel.layer.cornerRadius = 12; g_panel.clipsToBounds = YES; g_panel.hidden = YES;
+    [g_host addSubview:g_panel]; [g_panel release];
+    g_panel_scroll = [[UIScrollView alloc] initWithFrame:CGRectZero];
+    g_panel_scroll.alwaysBounceVertical = NO; g_panel_scroll.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    [g_panel addSubview:g_panel_scroll]; [g_panel_scroll release];
+    g_panel_content = [[UIView alloc] initWithFrame:CGRectZero];
+    [g_panel_scroll addSubview:g_panel_content]; [g_panel_content release];
+    chrome_layout();
 }
-static int bar_visible(void) { return g_bar && g_bar.frame.origin.y > -20.0f ? 1 : 0; }
+static int bar_visible(void) { return g_bar_shown; }
+int ios_ui_chrome_blocks_touch(void) { return g_installed && bar_visible(); }
 
 /* ---- Step 39: what was left -- the stats OSD, the pause card, the intro strip, the full menu ------- */
 /* All of it was the last ImGui drew on a phone. Each one here drives the same state via overlay.cpp's
@@ -769,6 +752,12 @@ static int bar_visible(void) { return g_bar && g_bar.frame.origin.y > -20.0f ? 1
 static UILabel *g_osd_lbl;
 static void osd_tick(void) {
 	if (!g_installed || !g_host) return;
+	static double last;
+	static int lastLevel = -1;
+	const int level = overlay_stats_level();
+	const double now = chrome_now();
+	if (g_osd_lbl && !g_osd_lbl.hidden && level == lastLevel && now - last < 0.25 && !bar_visible() && !overlay_is_open()) return;
+	last = now; lastLevel = level;
 	char lines[7][40];
 	int n = 0;
 	if (overlay_stats_level() > 0 && !bar_visible() && !overlay_is_open()) n = overlay_osd_lines(lines, 7);
@@ -778,7 +767,7 @@ static void osd_tick(void) {
 		g_osd_lbl.font = [UIFont fontWithName:@"Menlo-Bold" size:10.0f];
 		g_osd_lbl.textColor = [UIColor whiteColor];
 		g_osd_lbl.numberOfLines = 0;
-		g_osd_lbl.layer.backgroundColor = rgba(0, 0, 0, 0.66f).CGColor;
+		g_osd_lbl.backgroundColor = rgba(0, 0, 0, 0.66f);
 		g_osd_lbl.layer.cornerRadius = 3.0f;
 		g_osd_lbl.layer.masksToBounds = YES;
 		[g_host addSubview:g_osd_lbl];
@@ -792,7 +781,7 @@ static void osd_tick(void) {
 	const CGSize tz = [g_osd_lbl sizeThatFits:CGSizeMake(600.0f, 2000.0f)];
 	CGFloat y = 42.0f;   /* under the eye's own slot */
 	if (g_eye && !g_eye.hidden) { const CGFloat ey = CGRectGetMaxY(g_eye.frame) + 8.0f; if (ey > y) y = ey; }
-	g_osd_lbl.frame = CGRectMake(8.0f, y, tz.width + 12.0f, tz.height + 10.0f);
+	g_osd_lbl.frame = CGRectMake(chrome_safe_rect().origin.x + 8.0f, y, tz.width + 12.0f, tz.height + 10.0f);
 	g_osd_lbl.hidden = NO;
 }
 
@@ -800,7 +789,7 @@ static void osd_tick(void) {
 static UIView *g_pz_card; static UILabel *g_pz_t, *g_pz_s;
 static void pause_tick(void) {
 	if (!g_installed || !g_host) return;
-	const int show = overlay_game_paused() && !overlay_is_open() && !overlay_intro_up();
+	const int show = overlay_game_paused() && !overlay_is_open() && !overlay_intro_up() && !bar_visible();
 	if (!show) { if (g_pz_card) g_pz_card.hidden = YES; return; }
 	if (!g_pz_card) {
 		g_pz_card = [[UIView alloc] initWithFrame:CGRectZero];
@@ -808,14 +797,17 @@ static void pause_tick(void) {
 		blur_fill(g_pz_card, UIBlurEffectStyleSystemMaterialDark);
 		g_pz_card.layer.cornerRadius = 14.0f;
 		g_pz_card.layer.masksToBounds = YES;
-		g_pz_card.userInteractionEnabled = NO;
+		g_pz_card.userInteractionEnabled = YES;
+        tap_on(g_pz_card, ^{ overlay_set_paused(0); });
+        g_pz_card.accessibilityLabel = @"Resume game";
+        g_pz_card.accessibilityTraits = UIAccessibilityTraitButton;
 		g_pz_t = [[UILabel alloc] initWithFrame:CGRectZero];
 		g_pz_t.text = @"PAUSED"; g_pz_t.font = [UIFont systemFontOfSize:24.0f weight:UIFontWeightBold];
 		g_pz_t.textColor = [UIColor whiteColor]; g_pz_t.textAlignment = NSTextAlignmentCenter;
 		[g_pz_card addSubview:g_pz_t]; [g_pz_t release];
 		g_pz_s = [[UILabel alloc] initWithFrame:CGRectZero];
-		g_pz_s.text = @"Pull down from the top of the screen, then Game > Resume";
-		g_pz_s.font = [UIFont systemFontOfSize:11.0f];
+		g_pz_s.text = @"Tap to resume, or open Menu for settings";
+		g_pz_s.font = [UIFont systemFontOfSize:13.0f];
 		g_pz_s.textColor = rgba(205, 205, 215, 1.0f); g_pz_s.textAlignment = NSTextAlignmentCenter;
 		[g_pz_card addSubview:g_pz_s]; [g_pz_s release];
 		[g_host addSubview:g_pz_card];
@@ -832,60 +824,41 @@ static void pause_tick(void) {
 /* the intro strip: the one-card lesson for the first launch, taps falling through it to the
  * running game (its own NoInputs), gone on the first touch anywhere or twelve seconds */
 static UIView *g_intro_view;
-static double g_intro_t0, g_intro_tap;
+static UILabel *g_intro_title, *g_intro_body;
+static double g_intro_t0;
 static void intro_tick(void) {
-	if (!g_installed || !g_host) return;
-	if (!overlay_intro_up()) {
-		if (g_intro_view) g_intro_view.hidden = YES;
-		g_intro_t0 = 0; g_intro_tap = 0;
-		return;
-	}
-	const double now = chrome_now();
-	if (!g_intro_t0) g_intro_t0 = now;
-	int touched = g_intro_tap > 0;
-	if (!touched) {   /* the first touch anywhere (the gamepad path the ImGui card watched for) */
-		int ks[8], xs[8], ys[8];
-		for (int port = 0; port < 2 && !touched; port++) if (window_touch_contacts(port, ks, xs, ys, 8) > 0) touched = 1;
-		if (touched) g_intro_tap = now;
-	}
-	if (!touched && now - g_intro_t0 > 12.0) { overlay_intro_dismiss(); return; }
-	if (touched && now - g_intro_tap > 1.2) { overlay_intro_dismiss(); return; }   /* a moment, then the game */
-	if (!g_intro_view && !touched) {
-		g_intro_view = [[UIView alloc] initWithFrame:CGRectZero];
-		g_intro_view.backgroundColor = [UIColor clearColor];
-		blur_fill(g_intro_view, UIBlurEffectStyleSystemMaterialDark);
-		g_intro_view.layer.cornerRadius = 12.0f;
-		g_intro_view.layer.masksToBounds = YES;
-		g_intro_view.userInteractionEnabled = NO;   /* the game's own touches, as the strip always let them */
-		UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
-		t.text = @"Playing on this phone"; t.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightSemibold];
-		t.textColor = [UIColor whiteColor];
-		[g_intro_view addSubview:t]; [t release];
-		UILabel *b = [[UILabel alloc] initWithFrame:CGRectZero];
-		b.text = @"Buttons and shoulders at the edges. Hold or drag the lower left and the movement stick spawns under your thumb there; a quick tap anywhere always touches the game's screen.";
-		b.font = [UIFont systemFontOfSize:10.5f]; b.textColor = rgba(150, 156, 172, 1.0f);
-		b.numberOfLines = 0;
-		[g_intro_view addSubview:b]; [b release];
-		UILabel *a = [[UILabel alloc] initWithFrame:CGRectZero];
-		a.text = @"Pull down from the top for the menu. The little eye at the top left turns these controls off and on.";
-		a.font = [UIFont systemFontOfSize:10.5f]; a.textColor = rgba(240, 192, 96, 1.0f);
-		a.numberOfLines = 0;
-		[g_intro_view addSubview:a]; [a release];
-		[g_host addSubview:g_intro_view];
-		[g_intro_view release];
-		UILabel *tl = [g_intro_view.subviews objectAtIndex:1], *bl = [g_intro_view.subviews objectAtIndex:2], *al = [g_intro_view.subviews objectAtIndex:3];   /* (0: the blur) */
-		const CGSize sz = g_host.bounds.size;
-		const CGFloat cw = fminf(sz.width * 0.52f, 430.0f), in = 14.0f;
-		const CGSize bs = [bl sizeThatFits:CGSizeMake(cw - 2 * in, 2000.0f)];
-		const CGSize as = [al sizeThatFits:CGSizeMake(cw - 2 * in, 2000.0f)];
-		const CGFloat ch = 14 + 18 + 6 + bs.height + 8 + as.height + 12;
-		g_intro_view.frame = CGRectMake((sz.width - cw) * 0.5f, sz.height - ch - 12.0f, cw, ch);
-		tl.frame = CGRectMake(in, 12, cw - 2 * in, 18);
-		bl.frame = CGRectMake(in, 36, cw - 2 * in, bs.height);
-		al.frame = CGRectMake(in, 36 + bs.height + 8, cw - 2 * in, as.height);
-		chrome_log("    chrome: intro strip up (%.0f x %.0f)", cw, ch);
-	}
-	if (g_intro_view) g_intro_view.hidden = touched != 0;   /* the first touch: it simply goes */
+    if (!overlay_intro_up()) { g_intro_view.hidden = YES; g_intro_t0 = 0; return; }
+    const double now = chrome_now();
+    if (!g_intro_t0) g_intro_t0 = now;
+    int keys[8], xs[8], ys[8];
+    const int touched = window_touch_contacts(0, keys, xs, ys, 8) || window_touch_contacts(1, keys, xs, ys, 8);
+    if (touched || now - g_intro_t0 >= 12 || bar_visible()) {
+        overlay_intro_dismiss(); g_intro_view.hidden = YES; return;
+    }
+    if (!g_intro_view) {
+        g_intro_view = [[UIView alloc] initWithFrame:CGRectZero];
+        blur_fill(g_intro_view, UIBlurEffectStyleSystemMaterialDark);
+        g_intro_view.layer.cornerRadius = 12; g_intro_view.clipsToBounds = YES;
+        g_intro_view.userInteractionEnabled = NO;
+        g_intro_title = [[UILabel alloc] init];
+        g_intro_title.text = @"Playing on this phone";
+        g_intro_title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        g_intro_title.textColor = [UIColor whiteColor];
+        [g_intro_view addSubview:g_intro_title]; [g_intro_title release];
+        g_intro_body = [[UILabel alloc] init]; g_intro_body.numberOfLines = 0;
+        g_intro_body.font = [UIFont systemFontOfSize:13]; g_intro_body.textColor = rgba(220, 224, 234, 1);
+        g_intro_body.text = @"Hold or drag the lower corners for the sticks. Quick taps touch the game. Tap Menu at the top centre for settings; the eye hides or shows the controls.";
+        [g_intro_view addSubview:g_intro_body]; [g_intro_body release];
+        [g_host addSubview:g_intro_view]; [g_intro_view release];
+    }
+    const CGRect safe = chrome_safe_rect();
+    const CGFloat width = fmin(430, safe.size.width - 32);
+    const CGSize body = [g_intro_body sizeThatFits:CGSizeMake(width - 28, CGFLOAT_MAX)];
+    const CGFloat height = 50 + body.height;
+    g_intro_view.frame = CGRectMake(CGRectGetMidX(safe) - width / 2, CGRectGetMaxY(safe) - height - 8, width, height);
+    g_intro_title.frame = CGRectMake(14, 12, width - 28, 20);
+    g_intro_body.frame = CGRectMake(14, 36, width - 28, body.height);
+    g_intro_view.hidden = NO;
 }
 
 /* the settings center: the full menu as iOS's own settings look (Step 43) -- a real navigation bar
@@ -900,9 +873,8 @@ static UINavigationBar *g_cfg_nav;
 static UISegmentedControl *g_cfg_segs;
 static UITableView *g_cfg_tbl;
 static NSMutableArray *g_cfg_rows;   /* the open page's CfgRow models */
-static NSMutableArray *g_cfg_keep;
 static int g_cfg_page = -1;         /* the open page (-1: closed) */
-static UILabel *g_cfg_fps;          /* the Performance page's live number (its cell's own label) */
+static int g_cfg_last_page;
 static const char *const cfg_tab_names[5] = { "Display", "Performance", "Game", "Controls", "Help" };
 
 /* the frosted material every native card wears, one helper (the host keeps it, it never takes a touch) */
@@ -958,7 +930,7 @@ static CfgRow *cfg_segrow(const char *s, NSArray *items, int sel, void (^pick)(i
 }
 static CfgRow *cfg_slider(const char *s, float vmin, float vmax, float val, int integral, void (^num)(double)) {
 	CfgRow *r = cfg_row(R_SLIDER); cfg_row_title(r, s);
-	r->vmin = vmin; r->vmax = vmax; r->val = val; r->integral = integral; r->num = [num copy];
+	r->vmin = vmin; r->vmax = vmax; r->val = fmaxf(vmin, fminf(vmax, val)); r->integral = integral; r->num = [num copy];
 	return r;
 }
 static CfgRow *cfg_button(const char *s, void (^act)(void)) {
@@ -1073,7 +1045,7 @@ static void cfg_page_game(void) {
 		});
 		r->detail = @"Applies the next time the game starts";
 	}
-	cfg_slider("Volume", 0, 100, overlay_opt_get("volume") * 100.0f, 0, ^(double v) {
+	cfg_slider("Volume", 0, 100, overlay_opt_get("volume") * 100.0f, 1, ^(double v) {
 		overlay_set_volume((float)(v / 100.0));
 	});
 	if (overlay_game_has("fov")) {
@@ -1133,183 +1105,185 @@ static void cfg_page_controls(void) {
 }
 static void cfg_page_help(void) {
 	cfg_head("The controls");
-	cfg_note("Your thumbs: the stick at the left edge, the face buttons at the right, the shoulders at the top corners. Touch anywhere else in the lower right for the second stick.");
+	cfg_note("Hold or drag the lower left for the movement stick, or the lower right for the camera stick. A quick tap still touches the game. Left-handed mode swaps the sides.");
 	cfg_note("The picture itself is the Vita's touch screen: tap and drag it as you would the real thing.");
-	cfg_note("Pull down from the top of the screen for the quick menu; Game > All settings opens this one, and pauses the game while it is up.");
+	cfg_note("Tap Menu at the top centre for the quick menu. Game > All settings opens these pages and pauses the game. Done resumes play.");
 	cfg_head("About");
 	{
 		CfgRow *r = cfg_row(R_TEXT);
 		r->title = [[NSString alloc] initWithUTF8String:"Project Nativ"];
 		r->detail = [[NSString alloc] initWithUTF8String:"This PS Vita game, statically recompiled to native code, running on this phone's own CPU and GPU."];
 	}
-	cfg_note("The quick menu pulls down from the top of the screen. The little eye at the top left turns the on-screen controls off and on.");
+	cfg_note("The eye at the top left hides or shows the pad. The eye and Menu stay available when the pad is hidden.");
 }
 
 static void cfg_close(void);
-/* the table's host: the datasource and the delegate, one object for the app's life */
+
+static CGFloat text_height(NSString *text, CGFloat width, UIFont *font) {
+    if (!text.length) return 0;
+    return ceil([text boundingRectWithSize:CGSizeMake(fmax(40, width), CGFLOAT_MAX)
+        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+        attributes:@{NSFontAttributeName:font} context:nil].size.height);
+}
+static CGFloat cfg_height(CfgRow *row, CGFloat width) {
+    const CGFloat inner = fmax(80, width - 32);
+    const CGFloat titleWidth = row->kind == R_SWITCH ? inner - 64 : row->kind == R_PAIR ? inner * 0.52 : inner;
+    const CGFloat title = text_height(row->title, titleWidth, [UIFont systemFontOfSize:15]);
+    const CGFloat detail = text_height(row->detail, titleWidth, [UIFont systemFontOfSize:12]);
+    if (row->kind == R_HEAD) return 36;
+    if (row->kind == R_NOTE) return fmax(44, text_height(row->title, inner, [UIFont systemFontOfSize:13]) + 24);
+    if (row->kind == R_PAIR) return fmax(48, fmax(title, text_height(row->right, inner * 0.45, [UIFont systemFontOfSize:13])) + 24);
+    return fmax(row->kind == R_SWITCH ? 56 : 48, 24 + title + (detail ? detail + 4 : 0) +
+        ((row->kind == R_SEG || row->kind == R_SLIDER) ? 42 : 0));
+}
+
+/* A reused cell owns its model and its control. No global target list, dangling FPS label,
+ * stacked sliders, stale model values, or frames guessed before UITableView lays out the cell. */
+@interface CfgCell : UITableViewCell {
+@public
+    CfgRow *model;
+    UILabel *name, *note, *value;
+    UIControl *control;
+}
+- (void)configure:(CfgRow *)row;
+@end
+@implementation CfgCell
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)identifier {
+    self = [super initWithStyle:style reuseIdentifier:identifier];
+    if (self) {
+        name = [[UILabel alloc] init]; note = [[UILabel alloc] init]; value = [[UILabel alloc] init];
+        name.numberOfLines = note.numberOfLines = value.numberOfLines = 0;
+        note.font = [UIFont systemFontOfSize:12]; note.textColor = [UIColor secondaryLabelColor];
+        value.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+        value.textColor = [UIColor secondaryLabelColor]; value.textAlignment = NSTextAlignmentRight;
+        [self.contentView addSubview:name]; [self.contentView addSubview:note]; [self.contentView addSubview:value];
+        [name release]; [note release]; [value release];
+    }
+    return self;
+}
+- (void)dealloc { [model release]; [super dealloc]; }
+- (NSString *)formattedValue {
+    return model->integral ? [NSString stringWithFormat:@"%.0f%%", model->val] : [NSString stringWithFormat:@"%.2fx", model->val];
+}
+- (void)changed:(UIControl *)sender {
+    if (model->kind == R_SWITCH) {
+        model->on = ((UISwitch *)sender).on; ios_ui_haptic(0);
+        if (model->flip) model->flip(model->on);
+    } else if (model->kind == R_SEG) {
+        model->sel = (int)((UISegmentedControl *)sender).selectedSegmentIndex; ios_ui_haptic(0);
+        if (model->pick) model->pick(model->sel);
+    } else if (model->kind == R_SLIDER) {
+        model->val = ((UISlider *)sender).value;
+        if (model->integral) model->val = roundf(model->val);
+        value.text = [self formattedValue];
+    }
+}
+- (void)commit:(UISlider *)slider {
+    [self changed:slider];
+    if (model->num) model->num(model->val);
+}
+- (void)choose:(UIButton *)button {
+    CfgRow *row = model;
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:row->title message:row->detail preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSUInteger i = 0; i < row->seg.count; i++) {
+        const int index = (int)i;
+        [sheet addAction:[UIAlertAction actionWithTitle:row->seg[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            (void)action; row->sel = index; if (row->pick) row->pick(index);
+            [button setTitle:row->seg[index] forState:UIControlStateNormal];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = button;
+    sheet.popoverPresentationController.sourceRect = button.bounds;
+    [g_win.rootViewController presentViewController:sheet animated:YES completion:nil];
+}
+- (void)configure:(CfgRow *)row {
+    [control removeFromSuperview]; control = nil;
+    [row retain]; [model release]; model = row;
+    name.text = row->title; note.text = row->detail; value.text = nil;
+    name.font = [UIFont systemFontOfSize:row->kind == R_HEAD ? 13 : row->kind == R_NOTE ? 13 : 15
+        weight:row->kind == R_HEAD || row->kind == R_TEXT ? UIFontWeightSemibold : UIFontWeightRegular];
+    name.textColor = row->kind == R_HEAD ? rgba(240, 192, 96, 1) : row->kind == R_NOTE ? [UIColor secondaryLabelColor] : [UIColor labelColor];
+    self.selectionStyle = row->kind == R_BUTTON ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+    self.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    self.accessoryType = row->kind == R_BUTTON ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    if (row->kind == R_SWITCH) {
+        UISwitch *toggle = [[[UISwitch alloc] init] autorelease];
+        toggle.on = row->on; toggle.onTintColor = rgba(240, 192, 96, 1); control = toggle;
+    } else if (row->kind == R_SEG && row->seg.count <= 5) {
+        UISegmentedControl *segments = [[[UISegmentedControl alloc] initWithItems:row->seg] autorelease];
+        segments.selectedSegmentIndex = row->sel >= 0 && row->sel < (int)row->seg.count ? row->sel : UISegmentedControlNoSegment;
+        segments.selectedSegmentTintColor = rgba(240, 192, 96, 1);
+        [segments setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor blackColor]} forState:UIControlStateSelected];
+        control = segments;
+    } else if (row->kind == R_SEG) {
+        UIButton *choice = [UIButton buttonWithType:UIButtonTypeSystem];
+        const NSInteger selected = row->sel >= 0 && row->sel < (int)row->seg.count ? row->sel : 0;
+        [choice setTitle:row->seg[selected] forState:UIControlStateNormal];
+        choice.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+        [choice addTarget:self action:@selector(choose:) forControlEvents:UIControlEventTouchUpInside];
+        control = choice;
+    } else if (row->kind == R_SLIDER) {
+        UISlider *slider = [[[UISlider alloc] init] autorelease];
+        slider.minimumValue = row->vmin; slider.maximumValue = row->vmax; slider.value = row->val;
+        slider.minimumTrackTintColor = rgba(240, 192, 96, 1);
+        [slider addTarget:self action:@selector(commit:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        value.text = [self formattedValue]; control = slider;
+    } else if (row->kind == R_PAIR) value.text = row->right;
+    if (control) {
+        [control addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
+        control.accessibilityLabel = row->title; control.accessibilityHint = row->detail;
+        [self.contentView addSubview:control];
+    }
+    [self setNeedsLayout];
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (!model) return;
+    const CGFloat width = self.contentView.bounds.size.width, inner = width - 32;
+    CGFloat titleWidth = inner;
+    if (model->kind == R_SWITCH) titleWidth -= 64;
+    if (model->kind == R_PAIR) titleWidth *= 0.52;
+    if (model->kind == R_SLIDER) titleWidth -= 80;
+    const CGFloat titleHeight = text_height(model->title, titleWidth, name.font);
+    name.frame = CGRectMake(16, 12, titleWidth, titleHeight);
+    const CGFloat noteHeight = text_height(model->detail, titleWidth, note.font);
+    note.frame = CGRectMake(16, 16 + titleHeight, titleWidth, noteHeight);
+    value.frame = CGRectZero;
+    if (model->kind == R_SWITCH) control.frame = CGRectMake(width - 67, (self.contentView.bounds.size.height - 31) / 2, 51, 31);
+    if (model->kind == R_SEG || model->kind == R_SLIDER) {
+        const CGFloat y = 16 + titleHeight + (noteHeight ? noteHeight + 4 : 0);
+        control.frame = CGRectMake(16, y, inner, 32);
+    }
+    if (model->kind == R_SLIDER) value.frame = CGRectMake(width - 92, 12, 76, titleHeight);
+    if (model->kind == R_PAIR) value.frame = CGRectMake(16 + inner * 0.55, 12, inner * 0.45,
+        fmax(titleHeight, text_height(value.text, inner * 0.45, value.font)));
+}
+@end
+
 @interface CfgCenter : NSObject <UITableViewDataSource, UITableViewDelegate>
 - (void)done;
 @end
 static CfgCenter *g_cfg_center;
 @implementation CfgCenter
 - (void)done { ios_ui_haptic(0); cfg_close(); }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { (void)tv; (void)s; return (NSInteger)[g_cfg_rows count]; }
-- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
-	CfgRow *r = [g_cfg_rows objectAtIndex:[ip row]];
-	switch (r->kind) {
-	case R_SLIDER: return 64.0f;
-	case R_HEAD: return 34.0f;
-	case R_TEXT: return 76.0f;
-	case R_NOTE: {
-		static UILabel *m;
-		if (!m) { m = [[UILabel alloc] initWithFrame:CGRectZero]; m.font = [UIFont systemFontOfSize:13.0f]; m.numberOfLines = 0; [m retain]; }
-		m.text = r->title;
-		const CGSize sz = [m sizeThatFits:CGSizeMake(tv.bounds.size.width - 76.0f, 2000.0f)];
-		return sz.height + 16.0f;
-	}
-	case R_SWITCH: case R_SEG:
-		return r->detail ? 56.0f : 44.0f;
-	default:
-		return 44.0f;
-	}
+- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
+    (void)table; (void)section; return g_cfg_rows.count;
 }
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-	static NSString *const ids[8] = { @"h", @"s", @"g", @"l", @"b", @"n", @"p", @"t" };
-	CfgRow *r = [g_cfg_rows objectAtIndex:[ip row]];
-	NSString *id = ids[r->kind < 8 ? r->kind : 0];
-	UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:id];
-	if (!cell) {
-		cell = [[[UITableViewCell alloc] initWithStyle:((r->kind == R_SWITCH || r->kind == R_SEG) ? UITableViewCellStyleSubtitle : UITableViewCellStyleDefault) reuseIdentifier:id] autorelease];
-		if (r->kind == R_HEAD) { cell.separatorInset = UIEdgeInsetsMake(0, 0, 0, CGFLOAT_MAX); cell.selectionStyle = UITableViewCellSelectionStyleNone; }
-		if (r->kind == R_NOTE || r->kind == R_TEXT) { cell.selectionStyle = UITableViewCellSelectionStyleNone; cell.separatorInset = UIEdgeInsetsMake(0, 0, 0, CGFLOAT_MAX); }
-	}
-	g_keep = g_cfg_keep;
-	switch (r->kind) {
-	case R_HEAD:
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightSemibold];
-		cell.textLabel.textColor = rgba(240, 192, 96, 0.85f);
-		break;
-	case R_SWITCH: {
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
-		cell.textLabel.textColor = [UIColor labelColor];
-		cell.detailTextLabel.text = r->detail;
-		cell.detailTextLabel.font = [UIFont systemFontOfSize:11.5f];
-		cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-		cell.detailTextLabel.numberOfLines = 0;
-		UISwitch *sw = [[UISwitch alloc] init];
-		sw.on = r->on != 0;
-		sw.onTintColor = rgba(240, 192, 96, 0.92f);
-		__block UISwitch *wsw = sw;
-		[sw addTarget:[BN act:^{ ios_ui_haptic(0); r->flip(wsw.on); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-		cell.accessoryView = sw;   /* the cell owns it from here */
-		[sw release];
-		break;
-	}
-	case R_SEG: {
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
-		cell.textLabel.textColor = [UIColor labelColor];
-		cell.detailTextLabel.text = r->detail;
-		cell.detailTextLabel.font = [UIFont systemFontOfSize:11.5f];
-		cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-		cell.detailTextLabel.numberOfLines = 0;
-		UISegmentedControl *sg = [[UISegmentedControl alloc] initWithItems:r->seg];
-		sg.selectedSegmentIndex = r->sel;
-		sg.backgroundColor = [UIColor tertiarySystemFillColor];
-		sg.selectedSegmentTintColor = rgba(240, 192, 96, 0.92f);
-		[sg setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor labelColor]} forState:UIControlStateNormal];
-		[sg setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor]} forState:UIControlStateSelected];
-		__block UISegmentedControl *wsg = sg;
-		[sg addTarget:[BN act:^{ ios_ui_haptic(0); r->pick((int)wsg.selectedSegmentIndex); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-		[sg sizeToFit];
-		cell.accessoryView = sg;
-		[sg release];
-		break;
-	}
-	case R_SLIDER: {
-		const CGFloat cw = cell.contentView.bounds.size.width;
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
-		cell.textLabel.textColor = [UIColor labelColor];
-		UILabel *vl = [[UILabel alloc] initWithFrame:CGRectMake(cw - 92.0f, 13.0f, 76.0f, 19.0f)];
-		vl.font = [UIFont monospacedDigitSystemFontOfSize:12.0f weight:UIFontWeightRegular];
-		vl.textColor = [UIColor secondaryLabelColor];
-		vl.textAlignment = NSTextAlignmentRight;
-		NSString *(^fmt)(double) = ^(double v) { return r->integral ? [NSString stringWithFormat:@"%.0f", v] : [NSString stringWithFormat:@"%.2fx", v]; };
-		vl.text = fmt(r->val);
-		[cell.contentView addSubview:vl];
-		[vl release];
-		UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(16.0f, 34.0f, cw - 32.0f, 28.0f)];
-		sl.minimumValue = r->vmin; sl.maximumValue = r->vmax; sl.value = r->val;
-		sl.minimumTrackTintColor = rgba(240, 192, 96, 1.0f);
-		__block UISlider *wsl = sl; __block UILabel *wvl = vl;
-		[sl addTarget:[BN act:^{ wvl.text = fmt(wsl.value); if (r->num) r->num(wsl.value); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
-		[sl addTarget:[BN act:^{ if (r->num) r->num(wsl.value); }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-		[cell.contentView addSubview:sl];
-		[sl release];
-		break;
-	}
-	case R_BUTTON:
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:15.5f];
-		cell.textLabel.textColor = [UIColor labelColor];
-		cell.accessoryView = nil;
-		break;
-	case R_NOTE:
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:13.0f];
-		cell.textLabel.textColor = [UIColor secondaryLabelColor];
-		cell.textLabel.numberOfLines = 0;
-		break;
-	case R_PAIR: {
-		const CGFloat cw = cell.contentView.bounds.size.width;
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:14.5f];
-		cell.textLabel.textColor = [UIColor labelColor];
-		UILabel *rl = nil;
-		for (UIView *v in cell.contentView.subviews) if ([v isKindOfClass:[UILabel class]] && v != cell.textLabel) { rl = (UILabel *)v; break; }
-		if (!rl) {
-			rl = [[UILabel alloc] initWithFrame:CGRectMake(cw - 150.0f, 13.0f, 136.0f, 19.0f)];
-			rl.font = [UIFont systemFontOfSize:12.5f];
-			rl.textColor = [UIColor secondaryLabelColor];
-			rl.textAlignment = NSTextAlignmentRight;
-			rl.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-			[cell.contentView addSubview:rl];
-			[rl release];
-		}
-		rl.text = r->right;
-		if ([r->title isEqualToString:@"Frame rate"]) g_cfg_fps = rl;   /* the tick writes it live (set at configure: the reload is lazy) */
-		break;
-	}
-	case R_TEXT:
-		cell.textLabel.text = r->title;
-		cell.textLabel.font = [UIFont systemFontOfSize:19.0f weight:UIFontWeightSemibold];
-		cell.textLabel.textColor = [UIColor whiteColor];
-		{
-			UILabel *dl = nil;
-			for (UIView *v in cell.contentView.subviews) if ([v isKindOfClass:[UILabel class]] && v != cell.textLabel) { dl = (UILabel *)v; break; }
-			if (!dl) {
-				dl = [[UILabel alloc] initWithFrame:CGRectMake(16.0f, 42.0f, cell.contentView.bounds.size.width - 32.0f, 28.0f)];
-				dl.font = [UIFont systemFontOfSize:12.5f];
-				dl.textColor = [UIColor secondaryLabelColor];
-				dl.numberOfLines = 2;
-				[cell.contentView addSubview:dl];
-				[dl release];
-			}
-			dl.text = r->detail;
-		}
-		break;
-	}
-	return cell;
+- (CGFloat)tableView:(UITableView *)table heightForRowAtIndexPath:(NSIndexPath *)path {
+    return cfg_height(g_cfg_rows[path.row], table.bounds.size.width - 40);
 }
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
-	CfgRow *r = [g_cfg_rows objectAtIndex:[ip row]];
-	if (r->kind == R_BUTTON) { ios_ui_haptic(0); if (r->act) r->act(); }
-	[tv deselectRowAtIndexPath:ip animated:YES];
+- (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
+    CfgCell *cell = [table dequeueReusableCellWithIdentifier:@"setting"];
+    if (!cell) cell = [[[CfgCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"setting"] autorelease];
+    [cell configure:g_cfg_rows[path.row]];
+    return cell;
 }
-- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip { (void)tv; (void)ip; cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; }
+- (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
+    CfgRow *row = [g_cfg_rows[path.row] retain];
+    if (row->kind == R_BUTTON && row->act) { ios_ui_haptic(0); row->act(); }
+    [row release]; [table deselectRowAtIndexPath:path animated:YES];
+}
 @end
 
 static void cfg_close(void) {
@@ -1329,35 +1303,22 @@ static void cfg_page_build(int tab) {
 	}
 }
 static void cfg_rebuild(void) {
-	g_keep = g_cfg_keep;
 	const int tab = g_cfg_page >= 0 && g_cfg_page < 5 ? g_cfg_page : 0;
+	g_cfg_last_page = tab;
 	cfg_page_build(tab);
 	g_cfg_nav.topItem.title = [NSString stringWithUTF8String:cfg_tab_names[tab]];
 	g_cfg_segs.selectedSegmentIndex = tab;
-	g_cfg_fps = nil;
 	[g_cfg_tbl reloadData];
 	[g_cfg_tbl setContentOffset:CGPointZero animated:NO];
-	/* the Performance page's live number: its row's own right label (weakly ours; the tick writes it) */
-	for (NSUInteger i = 0; i < [g_cfg_rows count]; i++) {
-		CfgRow *r = [g_cfg_rows objectAtIndex:i];
-		if (r->kind == R_PAIR && [r->title isEqualToString:@"Frame rate"]) {
-			UITableViewCell *c = [g_cfg_tbl cellForRowAtIndexPath:[NSIndexPath indexPathForRow:(NSInteger)i inSection:0]];
-			if (c) {
-				for (UIView *v in c.contentView.subviews) if ([v isKindOfClass:[UILabel class]] && v != c.textLabel) { g_cfg_fps = (UILabel *)v; break; }
-			}
-		}
-	}
 }
 static void cfg_make(void) {
 	if (g_cfg_dim) return;
-	g_cfg_keep = [[NSMutableArray alloc] init];
-	g_keep = g_cfg_keep;
 	g_cfg_rows = [[NSMutableArray alloc] init];
 	g_cfg_center = [[CfgCenter alloc] init];
 	g_cfg_dim = [[UIView alloc] initWithFrame:g_host.bounds];
 	g_cfg_dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	g_cfg_dim.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.55f];
-	[g_cfg_dim addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:[BN act:^{ cfg_close(); }] action:@selector(fire)]];
+	tap_on(g_cfg_dim, ^{ cfg_close(); });
 	[g_host addSubview:g_cfg_dim];
 	[g_cfg_dim release];
 	const CGRect hb = g_host.bounds;
@@ -1395,7 +1356,7 @@ static void cfg_make(void) {
 	[g_cfg_segs setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor]} forState:UIControlStateSelected];
 	for (int i = 0; i < 5; i++) [g_cfg_segs insertSegmentWithTitle:[NSString stringWithUTF8String:cfg_tab_names[i]] atIndex:i animated:NO];
 	__block UISegmentedControl *wsg = g_cfg_segs;
-	[g_cfg_segs addTarget:[BN act:^{ ios_ui_haptic(0); g_cfg_page = (int)wsg.selectedSegmentIndex; cfg_rebuild(); }] action:@selector(fire) forControlEvents:UIControlEventValueChanged];
+	control_on(g_cfg_segs, UIControlEventValueChanged, ^{ ios_ui_haptic(0); g_cfg_page = (int)wsg.selectedSegmentIndex; cfg_rebuild(); });
 	[g_cfg_card addSubview:g_cfg_segs];
 	[g_cfg_segs release];
 	/* the page itself: a real table, inset-grouped (the Settings app's own look) */
@@ -1412,9 +1373,11 @@ static void cfg_make(void) {
 void ios_ui_settings_open(int tab) {
 	if (!g_installed) return;
 	if (![NSThread isMainThread]) { const int t = tab; dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_settings_open(t); }); return; }
+	bar_up_close_all(); touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
 	overlay_open();   /* the menu's own open state: the pause, the input routing, the audio mute */
 	if (!g_cfg_dim) cfg_make();
-	if (tab >= 0) g_cfg_page = tab; else if (g_cfg_page < 0) g_cfg_page = 0;
+	if (tab >= 0 && tab < 5) g_cfg_page = tab; else if (g_cfg_page < 0) g_cfg_page = g_cfg_last_page;
+	chrome_layout();
 	cfg_rebuild();
 	[g_host bringSubviewToFront:g_cfg_dim];
 	[g_host bringSubviewToFront:g_cfg_card];
@@ -1445,61 +1408,24 @@ void ios_ui_pad_layout(void) {
 			if (!tv->on || i >= tv->nb) continue;
 			v = [[PadBtn alloc] initWithFrame:CGRectZero];
 			v->idx = i;
+            v.opaque = NO;
 			[g_host addSubview:v];
 			[v release];   /* the host owns it */
 			g_pad_hits[i] = v;
 		}
-		if (!tv->on || i >= tv->nb) { v.hidden = YES; v->down = 0; continue; }
+		if (!tv->on || i >= tv->nb) { if (v->down) touchpad_native_release(10 + i); v.hidden = YES; v->down = 0; continue; }
 		const TpButton *b = &tv->b[i];
+		v->down = 0; /* a geometry change has released the old layout's fingers */
 		v->pill = b->pill;
 		if (b->pill) v.frame = CGRectMake(b->x - b->hw, b->y - b->hh, 2 * b->hw, 2 * b->hh);
 		else { const float e = b->r * 1.18f; v.frame = CGRectMake(b->x - e, b->y - e, 2 * e, 2 * e); }
 		v.hidden = NO;
+        v.isAccessibilityElement = YES;
+        static NSString *const names[8] = {@"Triangle", @"Circle", @"Cross", @"Square", @"Left shoulder", @"Right shoulder", @"Start", @"Select"};
+        v.accessibilityLabel = names[i]; v.accessibilityTraits = UIAccessibilityTraitButton;
 		chrome_log("    chrome:   btn %d -> (%.0f, %.0f, %.0f x %.0f) %s", i, v.frame.origin.x, v.frame.origin.y, v.frame.size.width, v.frame.size.height, b->pill ? "pill" : "round");
 	}
 }
-
-/* ---- the pull: an observer that never fails ----------------------------------------------- */
-/* test23's log ended the recogniser debate: `pull began` had never once appeared in any session --
- * the delegate-consulted pan, under whatever SDL and UIKit disagree about here, simply never began.
- * So it isn't a recogniser's decision anymore: it *observes*. A finger that begins within 16 points
- * of the top edge (off the eye's square) and moves 12 points down fires the bar once per touch, and
- * the recogniser itself never transitions at all -- the delegate always says no -- so the game's
- * own contact under the same finger goes on untouched (the bar's strip takes its own taps anyway). */
-@interface TopPull : UIPanGestureRecognizer
-@property CGFloat startX, startY;   /* where touch 0 landed, in the window's points */
-@property int fired;               /* this touch has already opened the bar */
-@end
-
-@implementation TopPull
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-	self.startX = 1e9; self.startY = 1e9; self.fired = 0;
-	UITouch *t = touches.anyObject;
-	if (t && self.view) { const CGPoint p = [t locationInView:self.view]; self.startX = p.x; self.startY = p.y; }
-	[super touchesBegan:touches withEvent:event];
-}
-- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-	{
-		/* only the strip's own middle band pulls (overlay.cpp's own gate, mirrored here): the
-		 * shoulders L and R live at the top corners and must never misstrigger the menu */
-		const CGFloat w = self.view ? self.view.bounds.size.width : 0;
-		if (self.startX < w * 0.5f - 140.0f || self.startX > w * 0.5f + 140.0f) self.fired = 1;
-	}
-	if (!self.fired && self.startY <= 16.0f && !(g_eye && self.startY <= CGRectGetMaxY(g_eye.frame) && self.startX <= CGRectGetMaxX(g_eye.frame))) {
-		UITouch *t = touches.anyObject;
-		if (t && self.view) {
-			const CGPoint p = [t locationInView:self.view];
-			if (p.y - self.startY > 12.0f) {
-				self.fired = 1;
-				ios_ui_bar_open();
-				ios_ui_haptic(0);
-				chrome_log("    chrome: pull fired, start (%.0f, %.0f)", self.startX, self.startY);
-			}
-		}
-	}
-	[super touchesMoved:touches withEvent:event];
-}
-@end
 
 /* the one object that holds the actions (target-action wants an NSObject; installed once, never
  * released: UIKit's targets and delegates are unretained, so this stays for the app's own life) */
@@ -1510,73 +1436,53 @@ static ChromeCenter *g_center;
 @implementation ChromeCenter
 - (void)eye:(id)sender {
 	(void)sender;
+	overlay_intro_dismiss();
 	const int on = touchpad_on();
 	touchpad_set_on(on ? 0 : 1);
 	overlay_toast_titled(on ? "Controls off" : "Controls on", on ? "The eye brings them back." : "", 2.4);
 	ios_ui_haptic(0);   /* the taptic engine answers the flip, as a native switch would */
 	g_eye_on = -1; eye_look();   /* the menu's own wording: the toast routes back here, natively */
 }
-- (void)pill:(id)sender {   /* the handle's tap: the strip, without a gesture from iOS's own edge */
-	(void)sender;
-	ios_ui_bar_open();
-	ios_ui_haptic(0);
+- (void)pill:(id)sender { (void)sender; ios_ui_bar_open(); }
+- (void)pulled:(UIPanGestureRecognizer *)pan {
+    if (pan.state == UIGestureRecognizerStateChanged && [pan translationInView:g_host].y > 10) ios_ui_bar_open();
 }
-- (void)pulled:(UIPanGestureRecognizer *)p { (void)p; }   /* the observer fires the pull itself; this recogniser never begins */
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g { (void)g; return NO; }   /* so it never takes a touch from the game */
-- (void)tick:(CADisplayLink *)l { (void)l;
-	const int on = touchpad_on();
-	if (g_eye) eye_look();   /* the menu's toggle reaches the eye */
-	{
-		/* the bar, its menus, a dialog: whatever ImGui holds over the picture gets the pixels, and
-		 * the pad's controls (their drawing: the layer; their taps: the buttons under it) stand down;
-		 * the native strip says the same with bar_visible() */
-		const int hide = overlay_pad_hidden() != 0 || bar_visible() != 0;   /* (bitmask of its reasons: the once-a-second line tells) */
-		if (hide != g_pad_hidden) {
-			g_pad_hidden = hide;
-			g_eye.hidden = hide;
-			if (g_pull_pill) g_pull_pill.hidden = hide;   /* the handle stands down with the pad, over the strip too */
-			if (g_pad_layer) { g_pad_layer.hidden = hide || !on; [g_pad_layer setNeedsDisplay]; }
-		}
-	}
-	{	/* the strip alone slides back up when nobody has touched it for a moment (an open panel holds it) */
-		if (g_bar && g_bar_shown && g_panel_tab < 0 && chrome_now() - g_bar_last > 2.5 && !overlay_is_open()) bar_up_close_all();
-	}
-	{	/* once, the whole chrome's own answers: the pill and the eye, their frames and their tree (test30's pill never painted -- this line says which piece of that was true) */
-		static int said = 0;
-		if (!said && g_pull_pill && g_eye) {
-			said = 1;
-			chrome_log("    chrome: chrome check: pill (%.0f, %.0f, %.0f x %.0f) hidden %d in-window %d, eye (%.0f, %.0f, %.0f x %.0f) hidden %d in-window %d",
-			           g_pull_pill.frame.origin.x, g_pull_pill.frame.origin.y, g_pull_pill.frame.size.width, g_pull_pill.frame.size.height,
-			           g_pull_pill.hidden, g_pull_pill.window != nil,
-			           g_eye.frame.origin.x, g_eye.frame.origin.y, g_eye.frame.size.width, g_eye.frame.size.height,
-			           g_eye.hidden, g_eye.window != nil);
-		}
-	}
-	osd_tick();     /* the stats overlay's own label (Off: nothing, ever) */
-	pause_tick();   /* the PAUSED card while Game > Pause, never over a menu */
-	intro_tick();   /* the first-launch strip: its twelve-second and first-touch rules live here */
-	if (g_cfg_dim && !g_cfg_dim.hidden && g_cfg_page == 1 && g_cfg_fps)
-		g_cfg_fps.text = [NSString stringWithFormat:@"%.0f fps", overlay_fps()];   /* the live number, while it shows */
-	{
-		/* once a second, the chrome's whole state in one line: the hidden bits (why the pad stood
-		 * down: 1 the menu, 2 the intro, 4 the bar down, 8 a popup), what the pads and sticks are
-		 * doing, and which buttons think they have a thumb */
-		static double said; static int said_on = -1, said_eye = -1;
-		const double now = chrome_now();
-		if (on != said_on) { said = 0; said_on = on; said_eye = -1; }   /* a pad flip says itself at once */
-		if (now - said >= 1.0) {
-			said = now;
-			const TpVisual *tv = touchpad_visuals();
-			char held[16]; int n = 0;
-			for (int i = 0; tv->on && i < tv->nb && i < 8; i++) held[n++] = g_pad_hits[i] && g_pad_hits[i]->down ? '0' + i : '.';
-			held[n] = 0;
-			chrome_log("    chrome: hidden bits %d, pad %s, sticks %s%s, held [%s], drew %d", overlay_pad_hidden(), on ? "on" : "off",
-			           tv->sl_active ? "L" : "-", tv->sr_active ? "R" : "-", tv->on ? held : "-", g_pad_draws);
-			(void)said_eye;
-		}
-	}
-	if (g_pad_layer) [g_pad_layer sync];   /* every tick: the signature inside decides whether anything repaints */
+- (void)tick:(CADisplayLink *)link {
+    (void)link;
+    if (!g_installed || [UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
+    if (!g_win.rootViewController.presentedViewController && g_win.subviews.lastObject != g_host) [g_win bringSubviewToFront:g_host];
+    chrome_layout();
+    if (g_eye) eye_look();
+    const int reasons = overlay_pad_hidden();
+    const BOOL hideChrome = overlay_is_open() || bar_visible() || (reasons & 8);
+    g_eye.hidden = hideChrome; g_pull_pill.hidden = hideChrome;
+    const BOOL hidePad = !touchpad_on() || reasons || bar_visible();
+    for (int i = 0; i < 8; i++) if (g_pad_hits[i]) {
+        if (hidePad && g_pad_hits[i]->down) { g_pad_hits[i]->down = 0; touchpad_native_release(10 + i); }
+        g_pad_hits[i].hidden = hidePad || g_pad_disabled;
+    }
+    if (g_pad_layer && !g_pad_disabled) [g_pad_layer sync];
+    /* A controller or keyboard can open/close the same settings state. Special game cards remain ImGui. */
+    const BOOL wantsSettings = overlay_native_settings_wanted();
+    if (wantsSettings && (!g_cfg_card || g_cfg_card.hidden)) ios_ui_settings_open(overlay_native_settings_page());
+    if (!wantsSettings && g_cfg_card && !g_cfg_card.hidden) {
+        g_cfg_card.hidden = YES; g_cfg_dim.hidden = YES; g_cfg_page = -1;
+    }
+    if (overlay_is_open() && bar_visible()) bar_up_close_all();
+    if (g_bar_shown && g_panel_tab < 0 && chrome_now() - g_bar_last > 4) bar_up_close_all();
+    osd_tick(); pause_tick(); intro_tick();
+    static double lastStats;
+    const double now = chrome_now();
+    if (now - lastStats > 0.25) {
+        lastStats = now;
+        if (g_cfg_card && !g_cfg_card.hidden && g_cfg_page == 1) {
+            for (CfgCell *cell in g_cfg_tbl.visibleCells) if ([cell->model->title isEqualToString:@"Frame rate"]) {
+                cell->value.text = [NSString stringWithFormat:@"%.0f fps", overlay_fps()];
+            }
+        }
+    }
 }
+
 @end
 
 /* ---- the toasts: ImGui's cards, UIKit's own drawing ---------------------------------------- */
@@ -1640,37 +1546,62 @@ void ios_ui_chrome_toast(const char *title, const char *body, double seconds) {
 }
 
 /* ---- install / placement ------------------------------------------------------------------ */
-static UIWindow *chrome_window(void) {
-	for (UIScene *s in [UIApplication sharedApplication].connectedScenes)   /* the scene API: iOS 13's own way */
-		if ([s isKindOfClass:[UIWindowScene class]]) { UIWindow *w = ((UIWindowScene *)s).keyWindow; if (w) return w; }
-	return [UIApplication sharedApplication].keyWindow;   /* a scene still coming up, or none at all */
+/* Called before each present on the UI thread, including while menus are open. SDL's logical
+ * size can remain unchanged while its Metal UIView/drawable returns in portrait after resume. */
+int ios_ui_chrome_sync_window(int *width, int *height) {
+    if (!g_win || ![NSThread isMainThread]) return 0;
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return 0;
+    const CGRect bounds = g_win.bounds;
+    if (bounds.size.width <= 0 || bounds.size.height <= 0) return 0;
+    UIView *game = g_win.rootViewController.view;
+    if (!game || !game.superview || g_win.rootViewController.transitionCoordinator) return 0;
+    /* All supported orientations are landscape. Wait for UIKit to finish its window transition. */
+    if (bounds.size.height > bounds.size.width) return 0;
+    const CGRect frame = [game.superview convertRect:bounds fromView:g_win];
+    BOOL repaired = NO;
+    if (!CGRectEqualToRect(game.frame, frame)) {
+        game.frame = frame; [game setNeedsLayout]; repaired = YES;
+    }
+    [game layoutIfNeeded];
+    if ([game.layer isKindOfClass:[CAMetalLayer class]]) {
+        CAMetalLayer *metal = (CAMetalLayer *)game.layer;
+        const CGFloat scale = g_win.screen.nativeScale;
+        const CGSize drawable = CGSizeMake(round(game.bounds.size.width * scale), round(game.bounds.size.height * scale));
+        if (!CGSizeEqualToSize(metal.drawableSize, drawable)) {
+            metal.drawableSize = drawable; repaired = YES;
+        }
+    }
+    *width = (int)round(bounds.size.width); *height = (int)round(bounds.size.height);
+    if (g_host) {
+        g_host.frame = bounds;
+        if (!g_win.rootViewController.presentedViewController && g_win.subviews.lastObject != g_host) [g_win bringSubviewToFront:g_host];
+    }
+    if (repaired) chrome_log("    chrome: repaired game view to %.0fx%.0f points, %.1fx drawable", bounds.size.width, bounds.size.height, g_win.screen.nativeScale);
+    return 1;
 }
 
-void ios_ui_chrome_install(void) {
-	if (g_installed) return;
-	const char *off = getenv("RECOMP_NATIVE_CHROME");   /* =0: the ImGui chrome keeps the phone instead */
-	if (off && off[0] == '0' && off[1] == '\0') return;
-	if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_chrome_install(); }); return; }
-	UIWindow *win = chrome_window();
-	if (!win) { chrome_log("    chrome: no window to install into (the ImGui chrome keeps the phone)"); return;   /* nothing to hang from yet */ }
-	g_win = win;
-	{	/* where the chrome lives: on the window itself, beside the game's root view. Step 30 tried the
-	 * root view controller's view (the one SDL's Metal content sits in) -- and it went dark: not one
-	 * touch, not one paint, all session, while the very same views on the window had taken touches
-	 * dead-precisely in test19 (Step 31's numbers, then nothing from Step 30 on). Whatever that
-	 * view is at install time, it is not the tree the glass talks to; the window is. */
-		g_host = win;
-	}
+void ios_ui_chrome_install(void *native_window) {
+    if (g_installed || !native_window || ![NSThread isMainThread]) return;
+    g_win = (UIWindow *)native_window;
+    const char *off = getenv("RECOMP_NATIVE_CHROME");
+    if (off && off[0] == '0' && off[1] == '\0') return;
+    UIWindow *win = g_win;
+    g_host = [[ChromeHost alloc] initWithFrame:win.bounds];
+    g_host.backgroundColor = [UIColor clearColor];
+    g_host.opaque = NO; g_host.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    g_host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [win addSubview:g_host]; [g_host release];
+
 	{
 		const char *np = getenv("RECOMP_NATIVE_PAD");   /* =0: the native pad never comes up (the ImGui pad and the finger path again) */
 		g_pad_disabled = np && np[0] == '0' && np[1] == '\0';
 	}
 	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p (%s); pad %s)", win, win.bounds.size.width, win.bounds.size.height,
-	           g_host, g_host == win ? "the window" : "the root view", g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
+	           g_host, "chrome container", g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
 
 	g_center = [[ChromeCenter alloc] init];   /* kept: UIKit's targets and delegates don't retain */
-	g_eye = [[UIButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
-	g_eye.frame = CGRectMake(8.0f, 1.0f, 46.0f, 26.0f);   /* tp_layout's own call moves it to the corner's margin */
+	g_eye = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
+	g_eye.frame = CGRectMake(8, 8, 46, 32);   /* tp_layout's own call moves it to the corner's margin */
 	g_eye.layer.cornerRadius = 11.0f;
 	g_eye.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.40f].CGColor;   /* the chip's hairline (40%: findable on a black scene too -- test30's 24% vanished into the game's letterbox) */
 	g_eye.layer.borderWidth = 0.75f;
@@ -1682,16 +1613,16 @@ void ios_ui_chrome_install(void) {
 
 	{	/* the pull's pill: the old ImGui tab asked for a tap, and the top edge's swipe is iOS's own
 		 * (notifications). A small handle at the top centre, tappable, gone while the strip is down */
-		g_pull_pill = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-		g_pull_pill.frame = CGRectMake(win.bounds.size.width * 0.5f - 24.0f, 5.0f, 48.0f, 18.0f);
+		g_pull_pill = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];
+		g_pull_pill.frame = CGRectMake(win.bounds.size.width * 0.5f - 32, 5, 64, 32);
 		g_pull_pill.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
-		g_pull_pill.layer.cornerRadius = 9.0f;
-		g_pull_pill.backgroundColor = rgba(16, 18, 24, 0.78f);   /* the view's own property, the eye's proven path (test30's layer.backgroundColor never painted) */
+		g_pull_pill.layer.cornerRadius = 12.0f;
+        [g_pull_pill setTitle:@"Menu" forState:UIControlStateNormal];
+        g_pull_pill.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        g_pull_pill.accessibilityLabel = @"Open quick menu";
+		g_pull_pill.backgroundColor = rgba(16, 18, 24, 0.78f);   /* readable over both dark and bright scenes */
 		g_pull_pill.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.35f].CGColor;
 		g_pull_pill.layer.borderWidth = 0.5f;
-		UIImage *chev = glyph(@"chevron", 13.0f, 9.0f, [UIColor colorWithWhite:1.0f alpha:0.80f]);
-		[g_pull_pill setImage:chev forState:UIControlStateNormal];
-		g_pull_pill.imageView.contentMode = UIViewContentModeCenter;
 		[g_pull_pill addTarget:g_center action:@selector(pill:) forControlEvents:UIControlEventTouchUpInside];
 		[g_host addSubview:g_pull_pill];
 		[g_host bringSubviewToFront:g_pull_pill];
@@ -1701,30 +1632,29 @@ void ios_ui_chrome_install(void) {
 		           win.bounds.size.width, win.bounds.size.height);
 	}
 
-	TopPull *pull = [[TopPull alloc] initWithTarget:g_center action:@selector(pulled:)];
-	pull.delegate = (id)g_center;
-	[win addGestureRecognizer:pull];
-	[pull release];
+    UIPanGestureRecognizer *pull = [[UIPanGestureRecognizer alloc] initWithTarget:g_center action:@selector(pulled:)];
+    [g_pull_pill addGestureRecognizer:pull]; [pull release];
 
-	{	/* the pad: its picture (a full-screen canvas, synced by the display link) and its touch
+	{	/* the pad: cached control artwork, synced by the display link, and its touch
 		 * areas (picked up by tp_layout's own call, ios_ui_pad_layout, as its numbers change) */
 		memset(g_pad_hits, 0, sizeof g_pad_hits);
 		g_pad_layer = [[PadLayer alloc] initWithFrame:g_host.bounds];
+		g_pad_layer.opaque = NO;
 		g_pad_layer.userInteractionEnabled = NO;   /* touches fall through to the game, always */
 		g_pad_layer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 		g_pad_layer.hidden = YES;   /* until tp_layout says the pad is on */
-		[g_host addSubview:g_pad_layer];
+		[g_host insertSubview:g_pad_layer atIndex:0];
 		[g_pad_layer release];   /* the host owns it */
 	}
 
 	g_toast_host = [[UIView alloc] initWithFrame:CGRectZero];
-	g_toast_host.userInteractionEnabled = NO;   /* the corner they stack in never takes a touch */
+	g_toast_host.userInteractionEnabled = NO;   /* toasts never take a touch */
 	g_toast_host.translatesAutoresizingMaskIntoConstraints = NO;
 	[g_host addSubview:g_toast_host];
 	[g_toast_host.topAnchor constraintEqualToAnchor:g_host.safeAreaLayoutGuide.topAnchor constant:8.0f].active = YES;
 	[g_toast_host.trailingAnchor constraintEqualToAnchor:g_host.safeAreaLayoutGuide.trailingAnchor constant:-10.0f].active = YES;
 	[g_toast_host.widthAnchor constraintEqualToConstant:300.0f].active = YES;
-	[g_toast_host.bottomAnchor constraintLessThanOrEqualToAnchor:g_host.centerYAnchor].active = YES;
+	[g_toast_host.bottomAnchor constraintLessThanOrEqualToAnchor:g_host.safeAreaLayoutGuide.bottomAnchor constant:-8].active = YES;
 	[g_toast_host release];   /* as above: the host owns it */
 
 	g_toast_stack = [[UIStackView alloc] initWithFrame:CGRectZero];
@@ -1737,19 +1667,56 @@ void ios_ui_chrome_install(void) {
 	[g_toast_stack.topAnchor constraintEqualToAnchor:g_toast_host.topAnchor].active = YES;
 	[g_toast_stack.leadingAnchor constraintEqualToAnchor:g_toast_host.leadingAnchor].active = YES;
 	[g_toast_stack.trailingAnchor constraintEqualToAnchor:g_toast_host.trailingAnchor].active = YES;
+	[g_toast_stack.bottomAnchor constraintEqualToAnchor:g_toast_host.bottomAnchor].active = YES;
 	[g_toast_stack release];
 
 	CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:g_center selector:@selector(tick:)];
 	[dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];   /* the menu's toggle reaches the eye */
 
 	g_installed = 1;
+	chrome_layout();
+	chrome_log("    chrome: test34 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill
  * can never drift apart, the same place ImGui's chip derived (overlay.cpp) while it held the slot */
 void ios_ui_chrome_place(float x) {
-	if (!g_eye) return;
-	if (![NSThread isMainThread]) { const float v = x; dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_chrome_place(v); }); return; }
-	CGRect f = g_eye.frame;
-	if (f.origin.x != x) { f.origin.x = x; g_eye.frame = f; }
+    if (!g_eye || ![NSThread isMainThread]) return;
+    CGRect frame = g_eye.frame; frame.origin.x = x; g_eye.frame = frame;
+}
+
+static void chrome_layout(void) {
+    if (!g_host) return;
+    const CGRect bounds = g_host.bounds, safe = chrome_safe_rect();
+    const CGFloat top = 5 + g_win.safeAreaInsets.top;
+    const CGFloat margin = bounds.size.height * 0.025 + fmin(g_win.safeAreaInsets.left, bounds.size.height * 0.03);
+    g_eye.frame = CGRectMake(margin, top, 46, 32);
+    g_pull_pill.frame = CGRectMake(bounds.size.width / 2 - 32, top, 64, 32);
+    g_pad_layer.frame = bounds;
+    if (g_shield) g_shield.frame = bounds;
+    if (g_bar) {
+        const CGFloat height = 44 + g_win.safeAreaInsets.top;
+        g_bar.frame = CGRectMake(0, g_bar_shown ? 0 : -height, bounds.size.width, height);
+        CGFloat x = safe.origin.x + 8;
+        for (int i = 0; i < 3; i++) { g_bar_tab[i].frame = CGRectMake(x, height - 44, 100, 44); x += 104; }
+        [g_bar viewWithTag:700].frame = CGRectMake(CGRectGetMaxX(safe) - 68, height - 44, 60, 44);
+    }
+    if (g_cfg_card) {
+        const CGRect frame = CGRectInset(safe, 8, 8);
+        const BOOL changed = !CGRectEqualToRect(g_cfg_card.frame, frame);
+        g_cfg_dim.frame = bounds; g_cfg_card.frame = frame;
+        const CGFloat width = g_cfg_card.bounds.size.width;
+        g_cfg_nav.frame = CGRectMake(0, 0, width, 44);
+        g_cfg_segs.frame = CGRectMake(12, 48, width - 24, 32);
+        g_cfg_tbl.frame = CGRectMake(0, 86, width, fmax(0, frame.size.height - 86));
+        if (changed) { [g_cfg_tbl beginUpdates]; [g_cfg_tbl endUpdates]; }
+    }
+    /* Menus remain on-screen when the window/safe area changes. Avoid rebuilding their controls
+     * every frame (which would cancel a slider drag). */
+    static CGSize lastSize; static UIEdgeInsets lastInsets;
+    const UIEdgeInsets insets = g_win.safeAreaInsets;
+    if (!CGSizeEqualToSize(lastSize, bounds.size) || !UIEdgeInsetsEqualToEdgeInsets(lastInsets, insets)) {
+        lastSize = bounds.size; lastInsets = insets;
+        if (g_panel_tab >= 0) bar_panel_rebuild();
+    }
 }

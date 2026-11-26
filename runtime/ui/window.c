@@ -46,13 +46,16 @@
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
-/* the notch and the home indicator, in pixels (ios_shims.m); nothing on a desktop, or a phone without one */
+/* the notch and the home indicator, in window points (ios_shims.m); nothing on a desktop, or a phone without one */
 #if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 extern void ios_safe_insets(float *top, float *bottom, float *left, float *right);
 static void safe_insets(float *t, float *b, float *l, float *r) { ios_safe_insets(t, b, l, r); }
 /* the phone's native chrome (runtime/platform/ios_ui_chrome.m, UIKit's own eye, top pull and toasts;
  * RECOMP_NATIVE_CHROME=0 there keeps the ImGui-built ones instead of installing any of it) */
-extern void ios_ui_chrome_install(void);
+extern void ios_ui_chrome_install(void *native_window);
+extern int ios_ui_chrome_sync_window(int *width, int *height);
+extern int ios_ui_chrome_blocks_touch(void);
+extern void ios_ui_chrome_cancel_controls(void);
 extern void ios_ui_chrome_place(float x);
 extern void ios_ui_pad_layout(void);    /* the native buttons over the same layout: positioned from tp_layout's own numbers */
 extern void ios_ui_haptic(int kind);    /* the taptic engine: 0 light, 1 medium (the shoulders), 2 soft (a stick spawning) */
@@ -880,6 +883,7 @@ static void overlay_dump_maybe(uint32_t base, uint32_t w, uint32_t h, uint32_t p
 	if (target >= 0 && (long)display_frames() != target) return;
 	done = 1;
 	const char *path = getenv("RECOMP_OVERLAY_DUMP");
+	if (!path || !*path) return;
 	if (!gpu) { fprintf(stderr, "RECOMP_OVERLAY_DUMP: no GPU device, skipping\n"); return; }
 	if (!overlay_init(gpu, 0, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM)) { fprintf(stderr, "RECOMP_OVERLAY_DUMP: overlay_init failed\n"); return; }
 	uint8_t *tmp = malloc(4u * w * h);
@@ -958,10 +962,21 @@ void window_present(uint32_t base, uint32_t w, uint32_t h, uint32_t pitch) {
 
 /* ---- the on-screen pad (touchpad.h): laid out and hit-tested here, where SDL's fingers arrive */
 #include <math.h>
+#include "touchpad_layout.h"
 static TpVisual tv;
+static TpLayoutKey tp_layout_key;
+static int tp_layout_valid;
+static void tp_clear(void);
 static struct { SDL_FingerID id; int which; float bx, by; } tpf[10];   /* which: 1 left stick, 2 right stick, 10+i a button */
 static uint32_t tp_bits;
 static uint8_t tp_stick[4] = { 128, 128, 128, 128 };
+/* Only the UI thread owns layout and fingers. The game consumes one atomic input snapshot. */
+static uint64_t tp_input = UINT64_C(0x8080808000000000);
+static void tp_publish(void) {
+    const uint64_t state = (uint64_t)tp_bits | ((uint64_t)tp_stick[0] << 32) |
+        ((uint64_t)tp_stick[1] << 40) | ((uint64_t)tp_stick[2] << 48) | ((uint64_t)tp_stick[3] << 56);
+    __atomic_store_n(&tp_input, state, __ATOMIC_RELEASE);
+}
 static int tp_scale_pct = -1, tp_mirror_on = -1;
 
 const TpVisual *touchpad_visuals(void) { return &tv; }
@@ -974,10 +989,10 @@ int touchpad_scale(void) {
 }
 void touchpad_set_scale(int percent) {
 	tp_scale_pct = percent < 60 ? 60 : percent > 160 ? 160 : percent;
-	settings_set_int("touchpad_scale", tp_scale_pct); settings_save(); tv.w = -1;
+	settings_set_int("touchpad_scale", tp_scale_pct); settings_save(); tp_layout_valid = 0;
 }
 int touchpad_mirror(void) { if (tp_mirror_on < 0) tp_mirror_on = settings_int("touchpad_left", 0) != 0; return tp_mirror_on; }
-void touchpad_set_mirror(int on) { tp_mirror_on = on != 0; settings_set_int("touchpad_left", tp_mirror_on); settings_save(); tv.w = -1; }
+void touchpad_set_mirror(int on) { tp_mirror_on = on != 0; settings_set_int("touchpad_left", tp_mirror_on); settings_save(); tp_layout_valid = 0; }
 /* the floating second stick's corner zone: the player's setting, else the pack's RUN_ENV
  * (RECOMP_TOUCHPAD_RSTICK), else on. Games that act along the right edge of the screen want
  * it off (the overlay's menu shows and sets the same value). */
@@ -1007,7 +1022,7 @@ int touchpad_on(void) {
 	if (touch_known < 0) { int n = 0; SDL_TouchID *ids = SDL_GetTouchDevices(&n); SDL_free(ids); touch_known = n > 0; }
 	return touch_known;
 }
-void touchpad_set_on(int on) { settings_set_int("touchpad", on ? 1 : 0); settings_save(); tp_want_v = -2; tv.w = -1; }   /* (the cache: re-read, the layout: re-made) */
+void touchpad_set_on(int on) { tp_clear(); settings_set_int("touchpad", on ? 1 : 0); settings_save(); tp_want_v = -2; tp_layout_valid = 0; }   /* (the cache: re-read, the layout: re-made) */
 
 /* the eye's corner x (the leftmost margin, the slot tp_layout stands the leftmost shoulder pill off
  * from): valid with the pad off too -- the eye is the one control that never goes away, so it must
@@ -1016,75 +1031,31 @@ void touchpad_set_on(int on) { settings_set_int("touchpad", on ? 1 : 0); setting
 static float tp_eye_x;
 float touchpad_eye_x(void) { return tp_eye_x; }
 
-/* the layout for a picture of w x h, in pixels. Everything scales with the height, so a phone
- * and a tablet look the same. The sticks sit where a thumb rests, the shoulders where an index
- * finger reaches, and the middle of the screen stays the game's own touch panel.
- *
- * The safe-area insets are honoured only where they bite: the notch (or a Dynamic Island) and the
- * home indicator sit at the *centre* of their edges, while every control sits in a *corner* -- so the
- * side and bottom insets clamp, and the controls keep to the thumb's reach instead of drifting toward
- * the middle of the screen (a full 59-point side inset on a 3x phone pushed the stick a third of the
- * way in). The top edge keeps its inset: the shoulders are wide, and the island's pills can reach it. */
+/* Build a complete layout before publishing it or calling UIKit. Re-read safe areas and
+ * opacity as well as size: both can change without an SDL window resize. */
 static void tp_layout(float w, float h) {
-	const float sc = (touchpad_scale() / 100.0f);
-	if (tv.w == w && tv.h == h && tv.scale == sc && tv.on == touchpad_on() && tv.mirror == touchpad_mirror()) return;
-	memset(&tv, 0, sizeof tv);
-	tv.on = touchpad_on(); tv.w = w; tv.h = h; tv.scale = sc; tv.mirror = touchpad_mirror();
-	tv.opacity = settings_int("touchpad_opacity", 42);
-	float st = 0, sb = 0, sl = 0, sr = 0;   /* the notch and the home indicator */
-	safe_insets(&st, &sb, &sl, &sr);
-	const float clamp = h * 0.030f;
-	const float m = h * 0.025f;
-	const float ml = m + (sl < clamp ? sl : clamp), mr = m + (sr < clamp ? sr : clamp);
-	const float mb = m + (sb * 0.5f < clamp ? sb * 0.5f : clamp);   /* the home indicator: the corner half-space is clear, and never more than the clamp */
-	const float mt = m + st;
-	{	/* the eye's corner slot, before anything below: the pad off must not leave it behind -- the eye
-		 * is the one control that stays (its tap brings the pad back). Both draw at this margin, the
-		 * native twin (ios_ui_chrome.m) placed here and the ImGui chip (overlay.cpp) reading it. */
-		tp_eye_x = ml;
+    TpLayoutKey key = {0};
+    key.w = w; key.h = h; key.scale = touchpad_scale() / 100.0f;
+    key.on = touchpad_on(); key.mirror = touchpad_mirror();
+    safe_insets(&key.top, &key.bottom, &key.left, &key.right);
+    int opacity = settings_int("touchpad_opacity", 42);
+    if (opacity < 10) opacity = 10;
+    if (opacity > 90) opacity = 90;
+    if (tp_layout_valid && !memcmp(&key, &tp_layout_key, sizeof key)) {
+        tv.opacity = opacity;
+        return;
+    }
+    const uint32_t bits[8] = { TRIANGLE, CIRCLE, CROSS, SQUARE, LTRIG, RTRIG, START, SELECT };
+    TpVisual next = touchpad_build_layout(key, bits);
+    next.opacity = opacity;
+    tp_clear();  /* a rotation, size change or toggle releases the old geometry's fingers */
+    tv = next;
+    tp_layout_key = key; tp_layout_valid = 1;
+    tp_eye_x = touchpad_layout_margin(h, key.left);
 #if IOS_UI_CHROME
-		ios_ui_chrome_place(ml);
-		ios_ui_pad_layout();   /* the native buttons (ios_ui_chrome.m) read this same tv: one layout, two pictures */
+    ios_ui_chrome_place(tp_eye_x);
+    ios_ui_pad_layout();  /* never hand UIKit the empty, half-built struct */
 #endif
-	}
-	if (!tv.on) return;
-	const float rl = h * 0.140f * sc;          /* the left stick's reach */
-	const float rb = h * 0.055f * sc;          /* a face button */
-	const float gap = rb * 2.2f;
-	const float lx = tv.mirror ? w - mr - rl : ml + rl;
-	const float rx = tv.mirror ? ml + rb + gap : w - mr - rb - gap;   /* the face cluster's centre */
-	const float cy = h - mb - rb - gap;
-	tv.sl_x = lx; tv.sl_y = h - mb - rl; tv.sl_r = rl;
-	tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y;
-	tv.sr_r = h * 0.115f * sc;
-
-	TpButton *b = tv.b;
-	b[0] = (TpButton){ rx, cy - gap, rb, 0, 0, 0, TRIANGLE, TP_LABEL_TRIANGLE, 0 };
-	b[1] = (TpButton){ rx + gap, cy, rb, 0, 0, 0, CIRCLE, TP_LABEL_CIRCLE, 0 };
-	b[2] = (TpButton){ rx, cy + gap, rb, 0, 0, 0, CROSS, TP_LABEL_CROSS, 0 };
-	b[3] = (TpButton){ rx - gap, cy, rb, 0, 0, 0, SQUARE, TP_LABEL_SQUARE, 0 };
-	/* the shoulders: pills along the top, full width enough to hit with an index finger */
-	const float sw = w * 0.13f, sh = h * 0.075f;
-	float ll = tv.mirror ? w - mr - sw : ml, rl2 = tv.mirror ? ml : w - mr - sw;
-	{	/* whichever pill sits at the physical left stands off the corner: the controls eye lives
-		 * there (the phone's own placement -- "always at that leftmost spot"), its 46-point slot
-		 * and the gap; the eye draws into it from the pill's own left edge (overlay.cpp), so the
-		 * two can never disagree */
-		const float off = 46.0f + 8.0f;
-		if (tv.mirror) rl2 = ml + off; else ll = ml + off; }
-	b[4] = (TpButton){ ll + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, LTRIG, TP_LABEL_L, 0 };
-	b[5] = (TpButton){ rl2 + sw / 2, mt + sh / 2, 0, sw / 2, sh / 2, 1, RTRIG, TP_LABEL_R, 0 };
-	/* start and select, a touch bigger than before (start pauses, in every game), between the shoulders */
-	const float pw = w * 0.065f, ph = h * 0.058f;
-	b[6] = (TpButton){ w / 2 + pw * 1.1f, mt + ph / 2, 0, pw / 2, ph / 2, 1, START, TP_LABEL_START, 0 };
-	b[7] = (TpButton){ w / 2 - pw * 1.1f, mt + ph / 2, 0, pw / 2, ph / 2, 1, SELECT, TP_LABEL_SELECT, 0 };
-	tv.nb = 8;
-	static const char *pad_dbg;
-	if (!pad_dbg) pad_dbg = getenv("RECOMP_PAD_DEBUG");
-	if (pad_dbg && *pad_dbg && *pad_dbg != '0')
-		fprintf(stderr, "    pad layout %g x %g (insets t%g b%g l%g r%g): buttons r %g gap %g; shoulders y %g h %g; eye at x %g; start/select y %g; pockets (a tap is the game's, a hold or a drag spawns its stick): below y %g, the movement stick at x %s %g, the second stick (pack: %d) at x %s %g\n",
-		        w, h, st, sb, sl, sr, rb, gap, mt + sh / 2, sh, ml, mt + ph / 2,
-		        h * 0.50f, tv.mirror ? "above" : "below", (tv.mirror ? 0.58f : 0.42f) * w, window_touchpad_rstick(), tv.mirror ? "below" : "above", (tv.mirror ? 0.42f : 0.58f) * w);
 }
 
 /* which control is at (x,y): a button index + 10, or 0. The sticks no longer claim a landing
@@ -1107,7 +1078,7 @@ static int tp_hit(float x, float y) {
  * the thumb landed and a clean release of the brief game touch it began as. The movement stick's
  * pocket is the lower left (the left-handed layout flips it); the second stick's is the lower right,
  * and only where the pack allows one at all (RECOMP_TOUCHPAD_RSTICK, the menu's toggle over it). */
-static struct { SDL_FingerID id; float x, y; double at; int zone; } zwait[10];   /* a landing finger in a pocket, waiting to be a tap or a stick */
+static struct { SDL_FingerID id; float x, y, last_x, last_y; double at; int zone; } zwait[10];   /* a landing finger in a pocket, waiting to be a tap or a stick */
 static void tp_apply_stick(int which, float x, float y, float bx, float by, float reach, uint8_t *ox, uint8_t *oy);
 static int tp_zone_of(float x, float y) {
 	if (!tv.on || !tv.w || y < tv.h * 0.50f) return 0;
@@ -1115,7 +1086,7 @@ static int tp_zone_of(float x, float y) {
 	if (window_touchpad_rstick() && (tv.mirror ? (x < tv.w * 0.42f) : (x > tv.w * 0.58f))) return 2;   /* the second stick's, where the pack keeps one */
 	return 0;
 }
-static double tp_now(void) { return (double)(SDL_GetTicks() - 1) / 1000.0; }   /* (0 never happened: a finger landed at 0 once) */
+static double tp_now(void) { return (double)SDL_GetTicksNS() / 1e9 + 1e-9; }   /* (0 never happened: a finger landed at 0 once) */
 static int tp_zone_hold(const SDL_Event *e) {
 	const float x = e->tfinger.x * tv.w, y = e->tfinger.y * tv.h;
 	int k = -1;
@@ -1126,10 +1097,11 @@ static int tp_zone_hold(const SDL_Event *e) {
 	}
 	if (e->type == SDL_EVENT_FINGER_DOWN) {   /* remember where it landed, if that was in a pocket */
 		const int zone = tp_zone_of(x, y);
-		if (zone) for (int i = 0; i < 10; i++) if (!zwait[i].id) { zwait[i].id = e->tfinger.fingerID; zwait[i].x = x; zwait[i].y = y; zwait[i].at = tp_now(); zwait[i].zone = zone; break; }
+		if (zone) for (int i = 0; i < 10; i++) if (!zwait[i].id) { zwait[i].id = e->tfinger.fingerID; zwait[i].x = zwait[i].last_x = x; zwait[i].y = zwait[i].last_y = y; zwait[i].at = tp_now(); zwait[i].zone = zone; break; }
 		return 0;
 	}
 	if (e->type != SDL_EVENT_FINGER_MOTION || k < 0) return 0;
+	zwait[k].last_x = x; zwait[k].last_y = y;
 	/* the thresholds are a matter of thumb taste, and RECOMP_STICK_DRAG (points) / RECOMP_STICK_HOLD
 	 * (seconds) tune them from env.txt on a device, no rebuild -- the defaults: about half a thumb's
 	 * width, and a sixth of a second. */
@@ -1154,6 +1126,7 @@ static int tp_zone_hold(const SDL_Event *e) {
 		if (bx < tv.sr_r) bx = tv.sr_r;
 		if (bx > tv.w - tv.sr_r) bx = tv.w - tv.sr_r;
 		if (by > tv.h - tv.sr_r) by = tv.h - tv.sr_r;
+		tpf[slot].bx = bx; tpf[slot].by = by;
 		tv.sr_active = 1; tv.sr_x = bx; tv.sr_y = by; tv.sr_kx = x; tv.sr_ky = y;
 		tp_apply_stick(2, x, y, bx, by, tv.sr_r, &tp_stick[2], &tp_stick[3]);
 	}
@@ -1162,7 +1135,20 @@ static int tp_zone_hold(const SDL_Event *e) {
 	ios_ui_haptic(2);   /* the thumb's answer: what landed became a stick (the taptic engine knows before the eye does) */
 #endif
 	zwait[k].id = 0; zwait[k].zone = 0;
+	tp_publish();
 	return 1;
+}
+
+/* A stationary thumb sends no motion events; holding must still create its stick. */
+static void tp_zone_tick(void) {
+    if (!tv.on || !tv.w || overlay_is_open() || overlay_dialog_active()) return;
+    if (!window_touchpad_rstick()) for (int i = 0; i < 10; i++) if (zwait[i].zone == 2) memset(&zwait[i], 0, sizeof zwait[i]);
+    for (int i = 0; i < 10; i++) if (zwait[i].id) {
+        SDL_Event e = {0}; e.type = SDL_EVENT_FINGER_MOTION;
+        e.tfinger.fingerID = zwait[i].id;
+        e.tfinger.x = zwait[i].last_x / tv.w; e.tfinger.y = zwait[i].last_y / tv.h;
+        tp_zone_hold(&e);
+    }
 }
 
 static void tp_apply_stick(int which, float x, float y, float bx, float by, float reach, uint8_t *ox, uint8_t *oy) {
@@ -1176,9 +1162,10 @@ static void tp_apply_stick(int which, float x, float y, float bx, float by, floa
 }
 
 static void tp_release(int which) {
-	if (which >= 10) { int i = which - 10; if (i < tv.nb) { tp_bits &= ~tv.b[i].bit; tv.b[i].down = 0; } }
+	if (which >= 10) { int i = which - 10; if (i >= 0 && i < tv.nb) { tp_bits &= ~tv.b[i].bit; tv.b[i].down = 0; } }
 	else if (which == 1) { tv.sl_active = 0; tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y; tp_stick[0] = tp_stick[1] = 128; }
-	else if (which == 2) { tv.sr_active = 0; tp_stick[2] = tp_stick[3] = 128; }
+	else if (which == 2) { tv.sr_active = 0; tv.sr_kx = tv.sr_x; tv.sr_ky = tv.sr_y; tp_stick[2] = tp_stick[3] = 128; }
+	tp_publish();
 }
 
 static void tp_clear(void) {
@@ -1189,6 +1176,13 @@ static void tp_clear(void) {
 	for (int i = 0; i < tv.nb; i++) tv.b[i].down = 0;
 	tv.sl_active = tv.sr_active = 0;
 	tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y;
+	tv.sr_kx = tv.sr_x; tv.sr_ky = tv.sr_y;
+	tp_publish();
+}
+
+void touchpad_cancel_all(void) {
+	tp_clear();
+	for (int i = 0; i < ST_FINGERS; i++) st_down[i] = 0;
 }
 
 /* a finger over the pad: 1 when the pad took it (and the game's touch panel must not see it). With
@@ -1205,9 +1199,10 @@ static int pad_dbg(void) {
  * (whichever of the two draws it). tp_release lets go, clearing a press tp_clear already took. */
 void touchpad_native_press(int which) {
 	int i = which - 10;
-	if (!tv.on || overlay_is_open() || i < 0 || i >= tv.nb) return;
+	if (!tv.on || !touchpad_on() || overlay_is_open() || i < 0 || i >= tv.nb) return;
 	tp_bits |= tv.b[i].bit;
 	tv.b[i].down = 1;
+	tp_publish();
 	if (pad_dbg()) fprintf(stderr, "    native touch: button %d down\n", i);
 }
 void touchpad_native_release(int which) {
@@ -1224,6 +1219,7 @@ static int touchpad_event(const SDL_Event *e) {
 		if (pad_dbg()) fprintf(stderr, "    finger %u up: let go of %s\n", (unsigned)e->tfinger.fingerID, tpf[slot].which == 1 ? "the stick" : tpf[slot].which == 2 ? "the second stick" : tpf[slot].which >= 10 ? "a button" : "nothing");
 		tp_release(tpf[slot].which);
 		tpf[slot].id = 0; tpf[slot].which = 0;
+		tp_publish();
 		return 1;
 	}
 	if (e->type == SDL_EVENT_FINGER_DOWN) {
@@ -1249,12 +1245,14 @@ static int touchpad_event(const SDL_Event *e) {
 			tv.sr_kx = x; tv.sr_ky = y;
 			tp_apply_stick(2, x, y, bx, by, tv.sr_r, &tp_stick[2], &tp_stick[3]);
 		}
+		tp_publish();
 		return 1;
 	}
 	if (e->type == SDL_EVENT_FINGER_MOTION && slot >= 0) {
 		const int which = tpf[slot].which;
 		if (which == 1) { tp_apply_stick(1, x, y, tv.sl_x, tv.sl_y, tv.sl_r, &tp_stick[0], &tp_stick[1]); tv.sl_kx = x; tv.sl_ky = y; }
 		else if (which == 2) { tp_apply_stick(2, x, y, tpf[slot].bx, tpf[slot].by, tv.sr_r, &tp_stick[2], &tp_stick[3]); tv.sr_kx = x; tv.sr_ky = y; }
+		tp_publish();
 		return 1;
 	}
 	return 0;
@@ -1262,20 +1260,16 @@ static int touchpad_event(const SDL_Event *e) {
 
 /* the pad's contribution to the game's input this frame */
 static void touchpad_read(uint32_t *b, uint8_t s[4]) {
-	if (!tv.on) return;
-	*b |= tp_bits;
-	if (tp_stick[0] != 128 || tp_stick[1] != 128) { s[0] = tp_stick[0]; s[1] = tp_stick[1]; }
-	if (tp_stick[2] != 128 || tp_stick[3] != 128) { s[2] = tp_stick[2]; s[3] = tp_stick[3]; }
+    const uint64_t state = __atomic_load_n(&tp_input, __ATOMIC_ACQUIRE);
+    *b |= (uint32_t)state;
+    const uint8_t p[4] = { state >> 32, state >> 40, state >> 48, state >> 56 };
+    if (p[0] != 128 || p[1] != 128) { s[0] = p[0]; s[1] = p[1]; }
+    if (p[2] != 128 || p[3] != 128) { s[2] = p[2]; s[3] = p[3]; }
 }
 
 void window_input(uint32_t *b, uint8_t s[4]) {	*b = buttons & ~(L3 | R3 | PAD_L2 | PAD_R2);
 	for (int i = 0; i < 4; i++) s[i] = sticks[i];
-	/* the pad is laid out once a frame by the overlay, in the display's *point* space (the space its
-	 * sprites are drawn in and SDL's finger coordinates are fractions of, whatever the pixel scale);
-	 * this thread used to re-lay it out in *swapchain pixels* every read, a second scale racing the
-	 * first every frame. Only the time before the first frame presents falls back to laying out here,
-	 * in the window's point size -- the one scale there is. */
-	if (!tv.w && win) { int pw = 0, ph = 0; SDL_GetWindowSize(win, &pw, &ph); if (pw > 0 && ph > 0) tp_layout((float)pw, (float)ph); }
+	/* Layout is UI-thread only; the game reads the published input word. */
 	touchpad_read(b, s);   /* the on-screen pad's buttons and sticks, over the keyboard's and the pad's */
 	/* the sticks are the touch cursor while a bumper is held -- unless the touchpad is doing the touching
 	 * (RB held only to put its fingers on the rear panel: the sticks stay the game's) */
@@ -1410,9 +1404,6 @@ void window_run(void *(*fn)(void *), void *arg) {
   { const char *ws = getenv("RECOMP_WINDOW_SIZE"); int a = 0, b = 0;   /* WWxHH: a phone's aspect can be looked at on a desktop */
     if (ws && *ws && sscanf(ws, "%dx%d", &a, &b) == 2 && a >= 320 && b >= 240) { ww = a; wh = b; } }
   win = SDL_CreateWindow(name && *name ? name : "Project Nativ", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY); }
-#if IOS_UI_CHROME
-	ios_ui_chrome_install();   /* UIKit's own chrome on the phone: the eye, the top pull, the toasts -- beside the game's frame, never inside it */
-#endif
 	{	/* the app icon (assets/brand): the install's, as vitarecomp run names it (an AppImage's moves on every start), else
 		 * the one the build saw */
 		const char *ip = getenv("RECOMP_ICON");
@@ -1456,6 +1447,12 @@ void window_run(void *(*fn)(void *), void *arg) {
 	  aspect_mode = !strcmp(b, "stretch") ? ASPECT_STRETCH : !strcmp(b, "fill") ? ASPECT_FILL : ASPECT_FIT; }   /* window_set_aspect also saves: read it in directly instead, nothing changed yet */
 	if (settings_int("fullscreen", 0)) SDL_SetWindowFullscreen(win, true);
 	if (gpu) overlay_init(gpu, win, SDL_GetGPUSwapchainTextureFormat(gpu, win));
+#if IOS_UI_CHROME
+    /* Claiming the GPU replaces SDL's root UIView. Install above the final view. */
+    if (win) ios_ui_chrome_install(SDL_GetPointerProperty(SDL_GetWindowProperties(win), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL));
+#endif
+    if (win) { int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h); touchpad_layout_for(w, h); }
+
 	SDL_Gamepad *pad = 0;
 	int pad_back = 0, pad_start = 0, pad_combo_latch = 0;
 	uint64_t last_overlay_t = 0;
@@ -1465,9 +1462,28 @@ void window_run(void *(*fn)(void *), void *arg) {
 	pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 64u << 20);
 	pthread_create(&t, &at, game_main, &g);
 	for (;;) {
-		SDL_Event e;
-		finger_script();
+        SDL_Event e;
+#if IOS_UI_CHROME
+        int ui_w = 0, ui_h = 0;
+        if (win && ios_ui_chrome_sync_window(&ui_w, &ui_h)) {
+            int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h);
+            if (w != ui_w || h != ui_h) SDL_SetWindowSize(win, ui_w, ui_h);
+        }
+#endif
+        if (win) { int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h); touchpad_layout_for(w, h); }
+        finger_script();
 		while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST || e.type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+                touchpad_cancel_all(); buttons = 0; touch_down = 0; gamepad_touch_release();
+#if IOS_UI_CHROME
+                ios_ui_chrome_cancel_controls();
+#endif
+                for (int i = 0; i < KB_N; i++) kb_binds[i].held = 0;
+            }
+#if IOS_UI_CHROME
+            if (ios_ui_chrome_blocks_touch() && (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION ||
+                e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED)) continue;
+#endif
 			/* _exit, not SDL_Quit()+exit(): the game thread is still running and may be mid-call
 			 * into SDL (audio_output, window_present) or guest code; tearing down SDL subsystems
 			 * out from under it raced into a SIGSEGV at a null host function pointer. The OS
@@ -1497,25 +1513,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 			/* the save-data dialog waiting on the player (overlay_dialog_active): it has the keys and the mouse;
 			 * the game is polling the dialog, not the pad */
 			if (overlay_dialog_active()) { overlay_process_event(&e); continue; }
-#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-			/* re-entering the foreground (the screenshot swipe, the app switcher glanced at for a
-			 * moment) left SDL believing a stale, small window once -- the whole picture squashed into
-			 * a corner of the screen, the on-screen controls huge in the opposite corners, until the
-			 * app restarted; a device's report, 2026-11-26. The screen's own size is re-asserted here
-			 * every time focus returns: a window that already has it costs one query and no reshape. */
-			if (win && (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED || e.type == SDL_EVENT_WINDOW_RESTORED)) {
-				const SDL_DisplayID d = SDL_GetDisplayForWindow(win);
-				const SDL_DisplayMode *dm = d ? SDL_GetDesktopDisplayMode(d) : NULL;
-				if (dm) {
-					int sw = dm->w, sh = dm->h;
-					if (sh > sw) { int t = sw; sw = sh; sh = t; }   /* (this app is landscape-only: the natural portrait flips) */
-					int cw = 0, ch = 0; SDL_GetWindowSize(win, &cw, &ch);
-					fprintf(stderr, "    window: foreground again; the screen is %dx%d, the window says %dx%d%s\n", sw, sh, cw, ch,
-					        (cw == sw && ch == sh) ? "" : " -- re-asserting the window's size");
-					if (cw != sw || ch != sh) SDL_SetWindowSize(win, sw, sh);
-				}
-			}
-#endif
+
 			/* closed: ImGui still sees the mouse (and the window's focus/enter/leave), so the menu bar can
 			 * show on a hover at the top edge; a press or a move it has claimed (the pointer over the bar,
 			 * a menu or the pull tab, as of the last frame drawn) never becomes a touch below. A release
@@ -1662,6 +1660,14 @@ void window_run(void *(*fn)(void *), void *arg) {
 			if (e.type == SDL_EVENT_MOUSE_MOTION && mouse_rear_down && mouse_to_touch(e.motion.x, e.motion.y, 1, &tx, &ty)) { mouse_rear_x = tx; mouse_rear_y = clampi(ty, REAR_Y0, REAR_Y1); }
 			if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e.gaxis.axis < 4) { pad_raw[e.gaxis.axis] = e.gaxis.value; pad_sticks(e.gaxis.axis / 2); }
 		}
+#if IOS_UI_CHROME
+        if (win && ios_ui_chrome_sync_window(&ui_w, &ui_h)) {
+            int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h);
+            if (w != ui_w || h != ui_h) SDL_SetWindowSize(win, ui_w, ui_h);
+            touchpad_layout_for((float)ui_w, (float)ui_h);
+        }
+#endif
+		tp_zone_tick();
 		{	/* keyboard + mouse, once a loop: which scheme, the capture, WASD as the left stick, the look's stand-in */
 			static uint64_t last; uint64_t t = now_us(); double dt = last ? (t - last) / 1e6 : 0; last = t;
 			if (dt > 0.1) dt = 0.1;
@@ -1761,7 +1767,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 				/* past the game's own radial dead zone: a slow mouse is a small deflection, which the stick
 				 * curve would swallow -- start the motion at the dead zone's edge ("mouse_deadzone", the
 				 * fraction of full tilt the game ignores; RECOMP_MOUSE_DEADZONE from a game's conf) */
-				float ox = vx, oy = vy, m = sqrtf(vx * vx + vy * vy);
+				float ox, oy, m = sqrtf(vx * vx + vy * vy);
 				if (m > 0.002f) {
 					static float dz = -1; if (dz < 0) { const char *e = getenv("RECOMP_MOUSE_DEADZONE"); dz = (float)settings_float("mouse_deadzone", e ? atof(e) : 0.2); }
 					float m2 = dz + m * (1 - dz); if (m2 > 1) m2 = 1;
@@ -1877,7 +1883,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 		{	/* the menu just closed (any way: F10, Escape, a pad combo, its Resume button): the sticks moved
 			 * while it had the events -- a stick let go with the menu up would otherwise stay deflected */
 			static int was_open; int open = overlay_is_open() || overlay_dialog_active();   /* (the save dialog too) */
-			if (open && !was_open) { buttons = 0; touch_down = 0; gamepad_touch_release(); for (int i = 0; i < KB_N; i++) kb_binds[i].held = 0; }   /* let go of what was held as it opened */
+			if (open && !was_open) { touchpad_cancel_all(); buttons = 0; touch_down = 0; gamepad_touch_release(); for (int i = 0; i < KB_N; i++) kb_binds[i].held = 0; }   /* let go of what was held as it opened */
 			if (was_open && !open) {
 				kb_reload();   /* (the Controls page may have rebound keys) */
 				for (int i = 0; i < 4; i++) pad_raw[i] = pad ? SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)i) : 0;

@@ -859,6 +859,7 @@ int overlay_mouse_captured(void) { return g_ctx && g_has_window && g_mouse_captu
  * (its tap closes it: overlay_owns_point's turn), and while the bar is down the bar owns its strip. */
 static float g_chip[4];   /* the chip's rect as last built (x0..y1): build_pad_toggle fills it, for the debug story */
 extern "C" int overlay_finger_nav(float x, float y) {
+	if (ios_ui_chrome_active()) return 0; /* UIKit owns the visible Menu handle; no invisible second path. */
 	if (!g_ctx || !g_has_window || !phone_ui() || g_open || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) return 0;
 	ImGui::SetCurrentContext(g_ctx);
 	ImGuiIO &io = ImGui::GetIO();
@@ -906,8 +907,8 @@ extern "C" int overlay_pad_hidden(void) {
 	int bits = 0;
 	if (g_open) bits |= 1;
 	if (g_intro) bits |= 2;
-	if (g_bar_vis > 0.01f) bits |= 4;
-	if (!ctx.OpenPopupStack.empty()) bits |= 8;
+	if (!ios_ui_chrome_active() && g_bar_vis > 0.01f) bits |= 4;
+	if (!ctx.OpenPopupStack.empty() || overlay_dialog_active()) bits |= 8;
 	return bits;
 }
 
@@ -1037,6 +1038,11 @@ static void menu_help(void) {
 /* the native bar's own handles (ios_ui_chrome.m calls these; every one the same action the ImGui
  * menu row took, no new state invented) */
 extern "C" {
+    int overlay_native_settings_wanted(void) { return g_open && !g_quit_card && !g_layout_card && !g_prep_card; }
+    int overlay_native_settings_page(void) {
+        const int page = g_select_tab;
+        g_select_tab = -1; return page;
+    }
 	float overlay_volume(void) { prefs_load(); return P.vol; }
 	void overlay_set_volume(float v) { set_volume(v); }
 	int overlay_frame_rate_wanted(void) { prefs_load(); return P.fr; }
@@ -1667,7 +1673,7 @@ static void build_closed(void) {
 		const bool in_hot = inside && m.y <= HOT_PX;
 		if (!in_hot) { g_hot_since = -1; g_hot_block = false; }
 		else if (g_hot_since < 0) g_hot_since = t;
-		if (in_hot && !g_hot_block && t - g_hot_since >= HOT_DWELL_S) { g_bar_want = true; g_bar_active_t = t; }
+		if (!ios_ui_chrome_active() && in_hot && !g_hot_block && t - g_hot_since >= HOT_DWELL_S) { g_bar_want = true; g_bar_active_t = t; }
 		if (g_bar_open_req.exchange(0, std::memory_order_acquire)) { g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t; }   /* the native pull */
 		/* a touch screen has no hover: a tap leaves the "mouse" wherever the finger last landed, for
 		 * good. So on a phone only a finger actually on the glass counts as "the pointer is over the
@@ -1699,6 +1705,7 @@ static void build_closed(void) {
 			overlay_toast_titled("Menu", phone_ui() ? "Pull down from the top of the screen for the quick menu" : "Move the mouse to the top, or press [F10] or the PS button", TOAST_S);
 			overlay_toast_titled("Balance", "[A] [D] tilt left / right", TOAST_S); }
 	}
+	if (ios_ui_chrome_active()) { g_bar_want = false; g_bar_vis = 0; g_tab_a = 0; }
 	{	/* the slide, at a fixed rate either way */
 		const float target = g_bar_want ? 1.0f : 0.0f, step = dt > 0.1f ? 1.0f : dt / SLIDE_S;
 		g_bar_vis += target > g_bar_vis ? fminf(step, target - g_bar_vis) : -fminf(step, g_bar_vis - target);
