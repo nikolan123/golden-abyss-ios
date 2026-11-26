@@ -1122,6 +1122,17 @@ static void cfg_page_controls(void) {
 		});
 		r->detail = @"A floating stick in the lower right corner";
 	}
+	{   /* touch look (window.c): the pack's RECOMP_TOUCH_LOOK is the default, a saved flip wins,
+	       and it applies the same drag -- no ring, no stick, the drag itself pans the camera */
+		const char *e = getenv("RECOMP_TOUCH_LOOK");
+		CfgRow *r = cfg_switch("Touch look", settings_int("touch_look", e && *e && *e != '0'), ^(int to) {
+			settings_set_int("touch_look", to); settings_save();
+		});
+		r->detail = @"Drag anywhere on the screen to look around, Minecraft-style. Taps stay taps.";
+	}
+	cfg_slider("Look sensitivity", 30, 300, (float)(settings_float("touch_sens", 1.0) * 100.0), 1, ^(double v) {
+		settings_set_float("touch_sens", v / 100.0); settings_save();
+	});
 	cfg_slider("Pad size", 60, 160, (float)touchpad_scale(), 1, ^(double v) { touchpad_set_scale((int)(v + 0.5)); });
 	{
 		CfgRow *r = cfg_switch("Left-handed", touchpad_mirror(), ^(int to) { touchpad_set_mirror(to); });

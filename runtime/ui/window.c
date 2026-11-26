@@ -974,6 +974,34 @@ static void tp_clear(void);
 static struct { SDL_FingerID id; int which; float bx, by; } tpf[10];   /* which: 1 left stick, 2 right stick, 10+i a button */
 static uint32_t tp_bits;
 static uint8_t tp_stick[4] = { 128, 128, 128, 128 };
+/* Touch look ("touch_look", Controls; the pack's RECOMP_TOUCH_LOOK its default): a drag
+ * anywhere the buttons and the movement stick didn't take pans the camera the way a native
+ * game's touch does (Minecraft's look, not a joystick) -- the finger's speed is the turn, a
+ * resting finger is no turn, a tap stays the game's own touch, and there is no sprung stick
+ * to run out of reach. The velocity (window points/s) feeds the second stick's bytes; the
+ * tick below ends the turn when the finger stops sending motions, and the lift zeroes it. */
+static float tl_vx, tl_vy, tl_lx, tl_ly;   /* the look finger: velocity, last motion's place */
+static uint64_t tl_at;                    /* and when it last moved (0: none since the spawn) */
+static void tp_publish(void);
+static int tl_want(void) {
+	static int v = -1; static uint64_t at; const uint64_t t = now_us();
+	if (v < 0 || t - at > 500000) { at = t; const char *e = getenv("RECOMP_TOUCH_LOOK"); v = settings_int("touch_look", e && *e && *e != '0'); }
+	return v;
+}
+static float tl_sens(void) {
+	static float s = -1; static uint64_t at; const uint64_t t = now_us();
+	if (s < 0 || t - at > 500000) { at = t; s = (float)settings_float("touch_sens", 1.0); if (!(s > 0.3f)) s = 0.3f; if (s > 3) s = 3; }
+	return s;
+}
+static void tl_still(void) { tl_vx = tl_vy = 0; tl_at = 0; tp_stick[2] = tp_stick[3] = 128; }
+static void tl_publish(void) {
+	/* a deliberate drag, ~800 points/s, is most of the stick; sensitivity rescales it */
+	float dx = tl_vx * 0.0008f * tl_sens(), dy = tl_vy * 0.0008f * tl_sens();
+	if (dx > 1) dx = 1; if (dx < -1) dx = -1; if (dy > 1) dy = 1; if (dy < -1) dy = -1;
+	tp_stick[2] = (uint8_t)(128 + dx * 127);
+	tp_stick[3] = (uint8_t)(128 + dy * 127);
+	tp_publish();
+}
 /* Only the UI thread owns layout and fingers. The game consumes one atomic input snapshot. */
 static uint64_t tp_input = UINT64_C(0x8080808000000000);
 static void tp_publish(void) {
@@ -1085,13 +1113,18 @@ static int tp_hit(float x, float y) {
 static struct { SDL_FingerID id; float x, y, last_x, last_y; double at; int zone; } zwait[10];   /* a landing finger in a pocket, waiting to be a tap or a stick */
 static void tp_apply_stick(int which, float x, float y, float bx, float by, float reach, uint8_t *ox, uint8_t *oy);
 static int tp_zone_of(float x, float y) {
-	if (!tv.on || !tv.w || y < tv.h * 0.50f) return 0;
-	if (tv.mirror ? (x > tv.w * 0.58f) : (x < tv.w * 0.42f)) return 1;   /* the movement stick's pocket */
+	if (!tv.on || !tv.w) return 0;
+	if (rb_held) return 0;   /* a rear touch (RB held as it lands) is the game's own, never a stick or a look */
+	const int lower = y >= tv.h * 0.50f;
+	if (lower && (tv.mirror ? (x > tv.w * 0.58f) : (x < tv.w * 0.42f))) return 1;   /* the movement stick's pocket */
+	if (tl_want()) return 2;   /* touch look: every drag the buttons and the movement pocket didn't take pans the camera */
+	if (!lower) return 0;
 	if (window_touchpad_rstick() && (tv.mirror ? (x < tv.w * 0.42f) : (x > tv.w * 0.58f))) return 2;   /* the second stick's, where the pack keeps one */
 	return 0;
 }
 static double tp_now(void) { return (double)SDL_GetTicksNS() / 1e9 + 1e-9; }   /* (0 never happened: a finger landed at 0 once) */
 static int tp_zone_hold(const SDL_Event *e) {
+	if (overlay_is_open() || overlay_dialog_active()) return 0;   /* the menu's own taps and drags never become sticks */
 	const float x = e->tfinger.x * tv.w, y = e->tfinger.y * tv.h;
 	int k = -1;
 	for (int i = 0; i < 10; i++) if (zwait[i].id == e->tfinger.fingerID) { k = i; break; }
@@ -1115,7 +1148,7 @@ static int tp_zone_hold(const SDL_Event *e) {
 	const double now = tp_now();
 	if (hypotf(x - zwait[k].x, y - zwait[k].y) < drag_px && now - zwait[k].at < hold_s) return 0;   /* still maybe a tap */
 	const int zone = zwait[k].zone;
-	if ((zone == 1 && tv.sl_active) || (zone == 2 && tv.sr_active)) { zwait[k].id = 0; zwait[k].zone = 0; return 0; }   /* that stick has its thumb already; this finger stays the game's */
+	if ((zone == 1 && tv.sl_active) || (zone == 2 && (tv.sr_active || (tl_want() && tl_at)))) { zwait[k].id = 0; zwait[k].zone = 0; return 0; }   /* that stick -- or the look -- has its thumb already; this finger stays the game's */
 	int slot = -1;
 	for (int i = 0; i < 10; i++) if (!tpf[i].id) { slot = i; break; }
 	if (slot < 0) { zwait[k].id = 0; zwait[k].zone = 0; return 0; }
@@ -1125,6 +1158,8 @@ static int tp_zone_hold(const SDL_Event *e) {
 	if (zone == 1) {
 		tv.sl_active = 1; tv.sl_x = tpf[slot].bx; tv.sl_y = tpf[slot].by; tv.sl_kx = x; tv.sl_ky = y;
 		tp_apply_stick(1, x, y, tpf[slot].bx, tpf[slot].by, tv.sl_r, &tp_stick[0], &tp_stick[1]);
+	} else if (tl_want()) {   /* touch look: no ring, no base -- the drag itself is the control */
+		tl_vx = tl_vy = 0; tl_lx = x; tl_ly = y; tl_at = 0; tp_stick[2] = tp_stick[3] = 128;
 	} else {
 		float bx = tpf[slot].bx, by = tpf[slot].by;
 		if (bx < tv.sr_r) bx = tv.sr_r;
@@ -1146,7 +1181,13 @@ static int tp_zone_hold(const SDL_Event *e) {
 /* A stationary thumb sends no motion events; holding must still create its stick. */
 static void tp_zone_tick(void) {
     if (!tv.on || !tv.w || overlay_is_open() || overlay_dialog_active()) return;
-    if (!window_touchpad_rstick()) for (int i = 0; i < 10; i++) if (zwait[i].zone == 2) memset(&zwait[i], 0, sizeof zwait[i]);
+    if (!window_touchpad_rstick() && !tl_want()) for (int i = 0; i < 10; i++) if (zwait[i].zone == 2) memset(&zwait[i], 0, sizeof zwait[i]);
+    /* touch look: a finger resting sends no motions -- its turn ends. The short grace keeps a slow
+     * drag's coalesced-event gaps from stuttering it; tl_still clears tl_at, so it happens once. */
+    if (tl_at && tl_want() && (tp_stick[2] != 128 || tp_stick[3] != 128)) {
+        const uint64_t t = SDL_GetTicksNS();
+        if (t - tl_at > 60000000ULL) { tl_still(); tp_publish(); }
+    }
     for (int i = 0; i < 10; i++) if (zwait[i].id) {
         SDL_Event e = {0}; e.type = SDL_EVENT_FINGER_MOTION;
         e.tfinger.fingerID = zwait[i].id;
@@ -1168,7 +1209,7 @@ static void tp_apply_stick(int which, float x, float y, float bx, float by, floa
 static void tp_release(int which) {
 	if (which >= 10) { int i = which - 10; if (i >= 0 && i < tv.nb) { tp_bits &= ~tv.b[i].bit; tv.b[i].down = 0; } }
 	else if (which == 1) { tv.sl_active = 0; tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y; tp_stick[0] = tp_stick[1] = 128; }
-	else if (which == 2) { tv.sr_active = 0; tv.sr_kx = tv.sr_x; tv.sr_ky = tv.sr_y; tp_stick[2] = tp_stick[3] = 128; }
+	else if (which == 2) { tv.sr_active = 0; tv.sr_kx = tv.sr_x; tv.sr_ky = tv.sr_y; tp_stick[2] = tp_stick[3] = 128; tl_still(); }
 	tp_publish();
 }
 
@@ -1177,6 +1218,7 @@ static void tp_clear(void) {
 	memset(zwait, 0, sizeof zwait);   /* a finger waiting to become a stick waits no more: the pad is taken away under the menu */
 	tp_bits = 0;
 	tp_stick[0] = tp_stick[1] = tp_stick[2] = tp_stick[3] = 128;
+	tl_vx = tl_vy = 0; tl_at = 0;   /* the look finger too: the menu takes the whole pad */
 	for (int i = 0; i < tv.nb; i++) tv.b[i].down = 0;
 	tv.sl_active = tv.sr_active = 0;
 	tv.sl_kx = tv.sl_x; tv.sl_ky = tv.sl_y;
@@ -1255,7 +1297,18 @@ static int touchpad_event(const SDL_Event *e) {
 	if (e->type == SDL_EVENT_FINGER_MOTION && slot >= 0) {
 		const int which = tpf[slot].which;
 		if (which == 1) { tp_apply_stick(1, x, y, tv.sl_x, tv.sl_y, tv.sl_r, &tp_stick[0], &tp_stick[1]); tv.sl_kx = x; tv.sl_ky = y; }
-		else if (which == 2) { tp_apply_stick(2, x, y, tpf[slot].bx, tpf[slot].by, tv.sr_r, &tp_stick[2], &tp_stick[3]); tv.sr_kx = x; tv.sr_ky = y; }
+		else if (which == 2) {
+			if (tl_want()) {   /* touch look: the drag's speed is the turn, from this motion to the last */
+				const uint64_t t = SDL_GetTicksNS();
+				float dt = tl_at ? (float)(t - tl_at) / 1e9f : 0.008f;   /* its first motion after the spawn: a frame's worth */
+				if (dt <= 0 || dt > 0.2f) dt = 0.008f;
+				tl_vx += ((x - tl_lx) / dt - tl_vx) * 0.45f;
+				tl_vy += ((y - tl_ly) / dt - tl_vy) * 0.45f;
+				tl_lx = x; tl_ly = y; tl_at = t;
+				tl_publish();
+			} else tp_apply_stick(2, x, y, tpf[slot].bx, tpf[slot].by, tv.sr_r, &tp_stick[2], &tp_stick[3]);
+			tv.sr_kx = x; tv.sr_ky = y;
+		}
 		tp_publish();
 		return 1;
 	}

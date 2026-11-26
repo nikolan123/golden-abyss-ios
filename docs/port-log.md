@@ -723,3 +723,26 @@ remaining physical-device checks.
   the scaler rebuilds itself whenever its input or output size
   changes, so there is nothing to restart. The plain present path
   is one frame away whenever it is off.
+
+### Step 50 — touch look: the drag itself pans the camera
+
+- The phone's own ask, Minecraft's own scheme: with touch look on
+  there is no right joystick at all -- a drag anywhere on the screen
+  (everywhere the buttons, the menu and the movement stick's pocket
+  didn't take) pans the camera. The finger's speed is the turn, a
+  finger at rest is no turn, and the thumb never runs out of reach
+  the way a sprung stick's rim does. A quick tap stays the game's
+  own touch exactly as before (the same hold/drag threshold that
+  spawned the sticks decides), and a rear touch (RB held as the
+  finger lands) never becomes a look.
+- Underneath it is still the second stick's bytes the game reads:
+  the drag's velocity (window points a second, lowpassed) feeds
+  them, the per-loop tick ends the turn 60 ms after the last motion
+  (event coalescing's gaps never stutter a slow drag), and the lift
+  zeroes it. No ring, no knob -- the screen itself is the control.
+- Controls gets "Touch look" (the pack's RECOMP_TOUCH_LOOK is its
+  default, a saved flip wins, effect the same drag) and "Look
+  sensitivity" (30-300%); off returns the floating sprung stick the
+  "Second stick" toggle governs. The overlay's menus and the game's
+  taps are untouched: the zone path refuses to run while any menu is
+  open.
