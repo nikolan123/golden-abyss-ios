@@ -401,3 +401,28 @@ Window-hosted + image-carried is the combination never tried
 before: test19 had the window but a drawRect that never ran; test22
 had the image but a host that took no touches. This is both halves
 of the answer in one build.
+
+### Step 34 — the pull becomes an observer; the picture gains a raw layer
+
+test23's log ended two arguments at once. The menu that "doesn't
+always open": `pull began` had never once appeared in any session's
+log -- the delegate-consulted pan never began under SDL's run of
+the runloop, and the menu that did open rode the old 9-point strip
+alone -- while five of the user's taps at (165, 14), (181, 20)...
+were the L shoulder pill eating their pulls. So:
+
+- The pull is no longer a recogniser's decision. It observes: any
+  touch that begins in the window's low 16 points (off the eye's
+  square) and moves 12 points down opens the bar once, logged
+  (`pull fired`). The recogniser itself never formally begins
+  (its delegate always answers no), so the game's own contact under
+  the same finger goes on untouched.
+- The top strip's low 14 points are navigation's, always: the pad's
+  native touch areas step out of the band (a pull or a tap there
+  never presses a button), and overlay_finger_nav's own strip
+  widens from 9 to 14 to match.
+- The invisible picture gets a second, primitive carrier: the same
+  painted image now also lands on a raw CALayer placed after every
+  subview's layer -- over everything, no view machinery in the
+  path. Whichever of picture and pixel story is true, one build
+  now carries both.

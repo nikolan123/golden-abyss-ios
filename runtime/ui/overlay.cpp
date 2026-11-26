@@ -868,7 +868,7 @@ extern "C" int overlay_finger_nav(float x, float y) {
 		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
 		return 1;
 	}
-	if (bar_away && y <= 9.0f) {   /* a pull from the very top edge: the bar comes down */
+	if (bar_away && y <= 14.0f) {   /* a pull from the very top edge: the bar comes down (the strip's low 14 points: the pad's native touch areas step out of this band too) */
 		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
 		return 1;
 	}

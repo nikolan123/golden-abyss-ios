@@ -17,6 +17,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <UIKit/UIGestureRecognizerSubclass.h>
+#import <QuartzCore/QuartzCore.h>
 #include <stdlib.h>
 #include <math.h>
 #include "../ui/touchpad.h"   /* runtime/ui/touchpad.h: the one true layout -- tp_layout's own TpVisual */
@@ -43,6 +44,7 @@ static int           g_eye_on = -1;  /* what the eye last drew: the menu's toggl
 static int           g_pad_hidden = -1;   /* what the pad last showed under: 0 over the game, 1 under a menu, set hidden to match */
 static int           g_pad_disabled;      /* RECOMP_NATIVE_PAD=0: the native pad stands down (the ImGui pad draws, the finger path owns the taps) */
 int g_pad_draws;                          /* how many times the canvas has actually drawn (the tick's line says it) */
+static CALayer       *g_top_layer;        /* the same pad image as a raw CALayer above every view layer: the most primitive display iOS has (Step 34's differential) */
 
 /* while the chrome is installed this is the pad's own word: overlay.cpp gates pad_draw on it, so
  * a disabled native pad is the *whole* ImGui pad exactly as before, not a blank screen */
@@ -102,8 +104,10 @@ static void eye_look(void) {
 	(void)ev;
 	if (!touchpad_on() || overlay_is_open()) return NO;
 	{	/* wherever ImGui owns the point, the finger is its (a menu over the shoulders, a dialog):
-		 * fall through as though this control were not here -- the exact behaviour the tap used to have */
+		 * fall through as though this control were not here -- the exact behaviour the tap used to have.
+		 * And the window's low 14 points are navigation's own, always: a pull or a tap there is never a button */
 		const CGPoint wp = [self convertPoint:p toView:nil];
+		if (wp.y < 14.0f) return NO;
 		if (overlay_owns_point(wp.x, wp.y)) return NO;
 	}
 	if (pill) return CGRectContainsPoint(self.bounds, p);   /* UIKit asks this one question and trusts it: a YES outside the bounds is a YES for the whole window -- test17's whole-glass swallow */
@@ -276,7 +280,16 @@ struct PadSig {
 	UIImage *im = [r imageWithActions:^(UIGraphicsImageRendererContext *rc) { pad_paint_cg(rc.CGContext, tv, sz); }];
 	[fmt release]; [r release];
 	imgv.image = im;
+	if (!g_top_layer) {   /* the raw layer, placed after every subview's layer: over everything, no view machinery at all */
+		g_top_layer = [CALayer new];
+		g_top_layer.frame = g_host.bounds;
+		[g_host.layer addSublayer:g_top_layer];
+		[g_top_layer release];   /* the window's layer owns it */
+	}
+	g_top_layer.frame = self.bounds;
+	g_top_layer.contents = (__bridge id)im.CGImage;
 	imgv.hidden = s.hidden != 0;
+	g_top_layer.hidden = s.hidden != 0;
 	g_pad_draws++;
 	if (g_pad_draws == 1) chrome_log("    chrome: canvas painted (%.0fx%.0f, scale %.1f, opacity %.2f)", sz.width, sz.height, scale, tv->opacity / 100.0f);
 }
@@ -335,28 +348,39 @@ void ios_ui_pad_layout(void) {
 	}
 }
 
-/* ---- the pull: a pan that only ever means "the menu comes down" ---------------------------- */
-/* A finger that begins within 16 points of the top edge, not on the eye (its square is the
- * button's own), and moves down, not along. The recognizer sits on the window itself, so it sees
- * every touch without being the hit-test target of any: the game's fingers are the game's until
- * the moment the pull actually recognizes (cancelsTouchesInView then does the one handoff). */
+/* ---- the pull: an observer that never fails ----------------------------------------------- */
+/* test23's log ended the recogniser debate: `pull began` had never once appeared in any session --
+ * the delegate-consulted pan, under whatever SDL and UIKit disagree about here, simply never began.
+ * So it isn't a recogniser's decision anymore: it *observes*. A finger that begins within 16 points
+ * of the top edge (off the eye's square) and moves 12 points down fires the bar once per touch, and
+ * the recogniser itself never transitions at all -- the delegate always says no -- so the game's
+ * own contact under the same finger goes on untouched (the bar's strip takes its own taps anyway). */
 @interface TopPull : UIPanGestureRecognizer
 @property CGFloat startX, startY;   /* where touch 0 landed, in the window's points */
-- (BOOL)shouldPull;
+@property int fired;               /* this touch has already opened the bar */
 @end
 
 @implementation TopPull
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-	self.startX = 1e9; self.startY = 1e9;
+	self.startX = 1e9; self.startY = 1e9; self.fired = 0;
 	UITouch *t = touches.anyObject;
 	if (t && self.view) { const CGPoint p = [t locationInView:self.view]; self.startX = p.x; self.startY = p.y; }
 	[super touchesBegan:touches withEvent:event];
 }
-- (BOOL)shouldPull {
-	if (self.startY > 16.0f) return NO;
-	if (g_eye && self.startY <= CGRectGetMaxY(g_eye.frame) && self.startX <= CGRectGetMaxX(g_eye.frame)) return NO;
-	const CGPoint tr = [self translationInView:self.view];
-	return tr.y > 3.0f;
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	if (!self.fired && self.startY <= 16.0f && !(g_eye && self.startY <= CGRectGetMaxY(g_eye.frame) && self.startX <= CGRectGetMaxX(g_eye.frame))) {
+		UITouch *t = touches.anyObject;
+		if (t && self.view) {
+			const CGPoint p = [t locationInView:self.view];
+			if (p.y - self.startY > 12.0f) {
+				self.fired = 1;
+				overlay_bar_open();
+				ios_ui_haptic(0);
+				chrome_log("    chrome: pull fired, start (%.0f, %.0f)", self.startX, self.startY);
+			}
+		}
+	}
+	[super touchesMoved:touches withEvent:event];
 }
 @end
 
@@ -375,8 +399,8 @@ static ChromeCenter *g_center;
 	ios_ui_haptic(0);   /* the taptic engine answers the flip, as a native switch would */
 	g_eye_on = -1; eye_look();   /* the menu's own wording: the toast routes back here, natively */
 }
-- (void)pulled:(UIPanGestureRecognizer *)p { if (p.state == UIGestureRecognizerStateBegan) { TopPull *tp = (TopPull *)p; chrome_log("    chrome: pull began, start (%.0f, %.0f), now (%.0f, %.0f)", tp.startX, tp.startY, [p locationInView:nil].x, [p locationInView:nil].y); overlay_bar_open(); ios_ui_haptic(0); } }
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g { return [(TopPull *)g shouldPull]; }
+- (void)pulled:(UIPanGestureRecognizer *)p { (void)p; }   /* the observer fires the pull itself; this recogniser never begins */
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g { (void)g; return NO; }   /* so it never takes a touch from the game */
 - (void)tick:(CADisplayLink *)l { (void)l;
 	const int on = touchpad_on();
 	if (g_eye) eye_look();   /* the menu's toggle reaches the eye */
