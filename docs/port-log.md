@@ -714,3 +714,12 @@ remaining physical-device checks.
   Expected in the log: "metalfx: on (present-time spatial
   upscale)", then 960x544 -> 2796x1290 with the fence stats
   carrying the round's settings.
+
+### Step 49 — the MetalFX toggle in the settings center
+
+- Display -> Quality now opens with "MetalFX upscaling", a native
+  switch: RECOMP_METALFX (the pack's RUN_ENV) is its default, a
+  saved flip wins over it, and it takes effect the same frame --
+  the scaler rebuilds itself whenever its input or output size
+  changes, so there is nothing to restart. The plain present path
+  is one frame away whenever it is off.

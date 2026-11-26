@@ -998,6 +998,14 @@ static void cfg_page_display(void) {
 		});
 	}
 	cfg_head("Quality");
+	{   /* Apple's present-time upscaler (gfx_metalfx.m): the default comes from RECOMP_METALFX in the
+	       pack's RUN_ENV, a saved flip wins, and it takes effect the same frame -- no restart */
+		const char *e = getenv("RECOMP_METALFX");
+		CfgRow *r = cfg_switch("MetalFX upscaling", settings_int("metalfx", e && *e && *e != '0'), ^(int to) {
+			settings_set_int("metalfx", to); settings_save();
+		});
+		r->detail = @"Apple's upscaler sharpens the whole picture at render scale 1x, near full speed.";
+	}
 	if (overlay_capable("fullres")) {
 		CfgRow *r = cfg_switch("Full-resolution world", settings_int("full_res_world", 1), ^(int to) {
 			settings_set_int("full_res_world", to); settings_save();

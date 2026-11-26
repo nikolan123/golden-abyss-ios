@@ -26,9 +26,18 @@ static id<MTLDevice> fxdev = nil;
 static id<MTLFXSpatialScaler> fxscaler = nil;
 static SDL_GPUTexture *fxout = nil;
 static uint32_t fxin_w, fxin_h, fxout_w, fxout_h;   // what fxscaler/fxout are sized for now
-static int fx_enabled = -1, fx_failed = 0;
+static int fx_failed = 0, fx_logged = 0;
 
 static void fx_log(const char *fmt, ...) { va_list a; va_start(a, fmt); fputs("    metalfx: ", stderr); vfprintf(stderr, fmt, a); va_end(a); fputc('\n', stderr); }
+
+/* the Display page's "MetalFX upscaling" switch: a saved choice wins, RECOMP_METALFX
+ * (the pack's RUN_ENV) is the default, and the toggle takes effect the same frame */
+static int metalfx_wanted(void)
+{
+    extern int settings_int(const char *key, int def);
+    const char *e = getenv("RECOMP_METALFX");
+    return settings_int("metalfx", e && *e && *e != '0');
+}
 
 // The scaler (and its output texture) rebuilt for a new input or output size; the
 // swapchain's pixel size changes with rotation, the input with the render scale.
@@ -68,12 +77,8 @@ int metalfx_present(SDL_GPUDevice *gpu, SDL_GPUCommandBuffer *cmd, SDL_GPUTextur
                     uint32_t sw, uint32_t sh, SDL_GPUTexture *swap,
                     uint32_t dx, uint32_t dy, uint32_t dw, uint32_t dh)
 {
-    if (fx_enabled < 0) {
-        const char *e = getenv("RECOMP_METALFX");
-        fx_enabled = e && *e && *e != '0';
-        if (fx_enabled) fx_log("on (present-time spatial upscale)");
-    }
-    if (!fx_enabled || fx_failed || !gpu || !cmd || !src || !swap || !sw || !sh || dw < sw || dh < sh)
+    if (!fx_logged && metalfx_wanted()) { fx_logged = 1; fx_log("on (present-time spatial upscale)"); }
+    if (!metalfx_wanted() || fx_failed || !gpu || !cmd || !src || !swap || !sw || !sh || dw < sw || dh < sh)
         return 0;   // off, broken, or nothing to upscale (framegen's frames already land at window size)
     if (!fxscaler || fxin_w != sw || fxin_h != sh || fxout_w != dw || fxout_h != dh)
         if (!fx_rebuild(gpu, sw, sh, dw, dh)) return 0;
