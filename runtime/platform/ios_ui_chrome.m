@@ -170,10 +170,10 @@ static void pad_glyph_cg(CGContextRef c, int label, float cx, float cy, float r,
  * image whenever the pad's state actually changed, and a plain UIImageView carries the pixels --
  * the same delivery as every other UIKit control on the screen, no drawRect in the path at all. */
 static void pad_paint_cg(CGContextRef c, const TpVisual *tv, CGSize size) {
-	{	/* RECOMP_PAD_CANVAS_DEBUG (default this round; =0 takes it off): an amber square under the
-	 * top bar's centre, pure UIKit, none of the pad's state -- seeing it says the image rides */
+	{	/* RECOMP_PAD_CANVAS_DEBUG=1 turns the old amber probe back on; test24 proved the pixels ride,
+	 * so it stays off unless asked */
 		static int want = -1;
-		if (want < 0) { const char *e = getenv("RECOMP_PAD_CANVAS_DEBUG"); want = !(e && e[0] == '0' && e[1] == '\0'); }
+		if (want < 0) { const char *e = getenv("RECOMP_PAD_CANVAS_DEBUG"); want = e && e[0] == '1' && e[1] == '\0'; }
 		if (want) {
 			CGContextSetFillColorWithColor(c, [UIColor colorWithRed:1.0f green:0.73f blue:0.28f alpha:0.85f].CGColor);
 			CGContextFillRect(c, CGRectMake(size.width * 0.5f - 16.0f, 44.0f, 32.0f, 32.0f));
@@ -252,8 +252,21 @@ struct PadSig {
 
 @implementation PadLayer
 - (void)sync {
+	/* test25: sync runs every tick, hidden or not. The tick's own `hidden` gate is what kept test24's
+	 * screenshot honest by accident: a menu opened, sync stopped, and the raw layer went on showing the
+	 * last full-pad paint -- one made at the torn moment right after tp_layout's re-write of the pad
+	 * struct, all mis-shaped shapes, never healed. The signature decides whether anything repaints;
+	 * a bad read heals one tick later, and the hidden bit is part of the signature, so opening the
+	 * menu repaints (empty) at once. */
 	const TpVisual *tv = touchpad_visuals();
-	if (!tv->on || !tv->nb || !self.window) return;
+	if (!self.window) return;
+	const int show = tv->on && tv->nb;
+	if (!show) {   /* the pad itself off: both carriers down at once (the raw layer is nobody's subview -- it hides here too) */
+		sig = (struct PadSig){0};
+		if (made) imgv.hidden = YES;
+		if (g_top_layer) g_top_layer.hidden = YES;
+		return;
+	}
 	if (!made) {   /* the carrier itself: full-size, locked to our bounds, never a touch */
 		imgv = [[UIImageView alloc] initWithFrame:self.bounds];
 		imgv.userInteractionEnabled = NO;
@@ -261,7 +274,7 @@ struct PadSig {
 		[self addSubview:imgv];
 		[imgv release];
 		made = YES;
-		chrome_log("    chrome: canvas made (%.0fx%.0f in the root view, scale %.1fx)", self.bounds.size.width, self.bounds.size.height, self.window.screen.scale);
+		chrome_log("    chrome: canvas made (%.0fx%.0f on the window, scale %.1fx)", self.bounds.size.width, self.bounds.size.height, self.window.screen.scale);
 	}
 	struct PadSig s;
 	memset(&s, 0, sizeof s);
@@ -432,7 +445,7 @@ static ChromeCenter *g_center;
 			(void)said_eye;
 		}
 	}
-	if (g_pad_layer && !g_pad_layer.hidden) [g_pad_layer sync];   /* the buttons' boxes, a live stick's reach */
+	if (g_pad_layer) [g_pad_layer sync];   /* every tick: the signature inside decides whether anything repaints */
 }
 @end
 

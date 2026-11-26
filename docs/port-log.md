@@ -426,3 +426,31 @@ were the L shoulder pill eating their pulls. So:
   subview's layer -- over everything, no view machinery in the
   path. Whichever of picture and pixel story is true, one build
   now carries both.
+
+### Step 35 — the stale picture: sync stopped, and the torn paint stayed
+
+test24 delivered the pixels, and its screenshots + the log told the
+rest. The amber square measured *exactly* where the painter drew
+it (466, 60, 32 x 32 -- to the pixel), so the raw layer rides
+perfect. But the buttons over the pause menu measured 102 x 77
+points where the layout says 121 x 32 -- mis-shaped, oversized,
+over a menu where the pad must be invisible. The mechanics: the
+tick stopped calling sync the moment a menu opened (the layer
+counted as hidden), so the raw layer went on carrying the *last*
+full-pad paint -- the one made in the torn instant when tp_layout
+was mid-rewrite of the pad struct, garbage shapes that never
+healed. The amber-only "hidden paint" ran at the same time and
+proved, by being exact, that the compositor was never the problem.
+
+So sync runs every tick now, hidden or not: the signature decides
+whether anything repaints (torn reads heal one tick later; the
+hidden bit is part of the signature, so a menu opening repaints
+empty at once; the pad turning off takes both carriers down, the
+raw layer included -- it is nobody's subview and hid by nobody
+else). The amber probe comes out (RECOMP_PAD_CANVAS_DEBUG=1 brings
+it back), and RECOMP_PAD_DEBUG leaves the pack: the finger routing
+it printed is verified, and the log needs the quiet.
+
+The pads' *intended* proportions have never actually been seen on
+the glass yet -- every native picture so far was the torn one.
+What test25 shows is the first honest look at the painter's shapes.
