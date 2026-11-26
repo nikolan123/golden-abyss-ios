@@ -204,3 +204,40 @@ stands off 54 points to its right. The pill's own left edge is what
 the eye draws its slot from (and window.c's layout shifts the pill
 for), so the two cannot drift. Left-handed flips the pills, never the
 eye.
+
+### Step 26 — the chrome becomes UIKit's own
+
+The fix round first (test16): `tp_clear` also forgets the pockets'
+waiting fingers; the stick thresholds read RECOMP_STICK_DRAG and
+RECOMP_STICK_HOLD; Game grows a Frame rate 30/60 toggle; the pad's
+debug line prints the eye's slot and the pockets' bounds.
+
+Then the part the phone kept asking for: native chrome. The toolchain
+has no Swift (no swiftc, and SwiftUI wants a Swift runtime), so
+"native" here means Objective-C UIKit -- `runtime/platform/ios_ui_chrome.m`,
+compiled into the iOS host set and installed once, right after the
+SDL window exists:
+
+- **The eye is a UIButton** now, in the same corner slot (tp_layout
+  hands its leftmost margin to `ios_ui_chrome_place`, so pill and eye
+  still cannot drift). SF Symbols `eye`/`eye.slash`, the same dim
+  rounded chip, and taps route through the same `touchpad_set_on` +
+  the same toast text as before. A CADisplayLink keeps the icon in
+  step with the menu's own toggle.
+- **The pull is a UIPanGestureRecognizer** on the window itself: it
+  sees every touch while being the hit-test target of none, begins
+  only for a finger that lands within 16 points of the top edge and
+  moves down, and its Began posts `overlay_bar_open` -- an atomic
+  request the next ImGui frame takes in. The ImGui pull tab, its tap
+  and the old top-edge path all remain.
+- **The toasts are UIViews**, stacked at the top right inside the
+  safe area: the same dark card, amber edge and amber title, three at
+  most, fading in and out with Core Animation. overlay_toast_titled
+  routes there while the chrome is active.
+
+While it's installed, the ImGui twins stand down (build_pad_toggle
+returns; toasts skip the queue), and `RECOMP_NATIVE_CHROME=0` installs
+nothing at all -- the ImGui eye, pull and toasts carry the phone as
+they did. The chip's pad-off bug went with it: the eye's x is its own
+number now (touchpad_eye_x), not a pill's left edge (a pad-off layout
+has no pill, and the chip sat at -54, off the glass).

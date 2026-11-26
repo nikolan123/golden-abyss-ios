@@ -64,6 +64,7 @@ typedef struct {
 
 const TpVisual *touchpad_visuals(void);
 void touchpad_layout_for(float w, float h);   /* overlay.cpp draws this; never null */
+float touchpad_eye_x(void);                   /* the eye's corner x: valid with the pad off too */
 int touchpad_on(void);
 void touchpad_set_on(int on);
 int touchpad_scale(void);                 /* percent, 60..160 */

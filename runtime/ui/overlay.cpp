@@ -75,6 +75,19 @@ static int phone_ui(void) {
 #endif
 }
 
+/* the phone's native chrome (runtime/platform/ios_ui_chrome.m, built for iOS alone): UIKit's own
+ * eye, top pull and toasts, drawn over the game as real views instead of into ImGui's frame. While
+ * it's active the ImGui twins of all three stand down (the eye: build_pad_toggle returns; the
+ * toasts: posted to the native stack instead of the queued badges), and RECOMP_NATIVE_CHROME=0
+ * never installs it. Everywhere else this is nothing at all. */
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+extern "C" int  ios_ui_chrome_active(void);
+extern "C" void ios_ui_chrome_toast(const char *title, const char *body, double seconds);
+#else
+static inline int  ios_ui_chrome_active(void) { return 0; }
+static inline void ios_ui_chrome_toast(const char *, const char *, double) {}
+#endif
+
 /* a phone's text: sized from the *display's* height in points -- the size ImGui draws in. SDL reports the
  * window to ImGui in points and separately in pixels (2-3x on a phone: a Retina screen), and sizing from
  * the pixels made every screen of text that many times too big: 2x on an iPhone 11, 3x on a 15 Pro Max.
@@ -804,6 +817,10 @@ static double g_hot_since = -1;         /* when the pointer entered the top-edge
 static bool g_hot_block;                /* Escape hid the bar: the pointer must leave the zone before it can re-open it */
 static double g_bar_active_t = -1e9;    /* the last moment the pointer was over the bar, a menu was open, or the tab pinned it */
 static double g_bar_pin_until = -1e9;   /* the pull tab was tapped: the bar stays at least until then */
+static std::atomic<int> g_bar_open_req;   /* overlay_bar_open (the native pull's Began): taken in by the next frame */
+/* the native pull's own way in (ios_ui_chrome.m calls this from UIKit's recognizer thread-of-action);
+ * the frame that's about to build the bar takes the request, and no ImGui context is touched here */
+extern "C" void overlay_bar_open(void) { g_bar_open_req.store(1, std::memory_order_release); }
 static float g_tab_a;                   /* the pull tab's alpha */
 static double g_toast_until = -1e9; static bool g_toast_checked;   /* the first-launch menu hint's end (the pull tab shows with it) */
 /* the toasts: badges at the top right, newest on top (overlay_toast_titled: posted by any thread, taken in by the next frame) */
@@ -871,9 +888,18 @@ extern "C" int overlay_owns_point(float x, float y) {
 
 static void menu_game(void) {
 	if (phone_ui()) {   /* a phone: the four things anyone reaches for; no keyboard exists, so no key hints */
+		prefs_load();
 		if (ImGui::MenuItem(g_paused ? "Resume" : "Pause")) overlay_set_paused(!g_paused);
 		if (ImGui::MenuItem("All settings…")) overlay_open();
 		ImGui::TextUnformatted("Volume"); ImGui::SameLine(); volume_slider();
+		if (game_option("frame_rate")) {   /* a 120 Hz phone: worth finding without the full menu */
+			ImGui::Separator();
+			ImGui::TextUnformatted("Frame rate");
+			ImGui::Indent();
+			if (ImGui::MenuItem("30", nullptr, P.fr < 60)) set_frame_rate(30);
+			if (ImGui::MenuItem("60 (experimental)", nullptr, P.fr >= 60)) set_frame_rate(60);
+			ImGui::Unindent();
+		}
 		ImGui::Separator();
 		if (ImGui::MenuItem(quit_label())) g_want_quit = true;
 		return;
@@ -1058,10 +1084,14 @@ static void build_tab(float w, double t) {
  * down it makes way, the bar's Controls menu holds the same switch among all the others. */
 static void build_pad_toggle(float w) {
 	(void)w;
-	if (!phone_ui()) return;
+	if (!phone_ui() || ios_ui_chrome_active()) return;   /* while UIKit's own eye holds the corner (its tap), the chip stands down */
 	const TpVisual *tv = touchpad_visuals();
-	const float pill = tv && tv->nb >= 6 ? (tv->mirror ? tv->b[5].x - tv->b[5].hw : tv->b[4].x - tv->b[4].hw) : 0.0f;   /* the top strip's leftmost pill's left edge (window.c stands it off the corner for this) */
-	const float cw = 40, ch = 22, x0 = pill - 54.0f, y0 = 1;   /* its corner slot: 46 wide plus the 8-point gap the pill keeps */
+	float x0;
+	if (tv && tv->nb >= 6) {   /* the top strip's leftmost pill's left edge (window.c stands it off the corner for this) */
+		const float pill = tv->mirror ? tv->b[5].x - tv->b[5].hw : tv->b[4].x - tv->b[4].hw;
+		x0 = pill - 54.0f;
+	} else x0 = touchpad_eye_x();   /* the pad off: no pill exists, and the corner's own margin keeps the eye on the glass */
+	const float cw = 40, ch = 22, y0 = 1;   /* its corner slot: 46 wide plus the 8-point gap the pill keeps */
 	ImGui::SetNextWindowPos(ImVec2(x0, y0));
 	ImGui::SetNextWindowSize(ImVec2(cw, ch));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0, 0));
@@ -1097,6 +1127,7 @@ static void build_pad_toggle(float w) {
 }
 extern "C" void overlay_touch_cursor(int on) { g_touch_cursor = on != 0; }
 extern "C" void overlay_toast_titled(const char *title, const char *body, double seconds) {
+	if (phone_ui() && ios_ui_chrome_active()) { ios_ui_chrome_toast(title, body, seconds); return; }   /* the native stack takes it (its own three-card rule, its own fade) */
 	std::lock_guard<std::mutex> l(g_toast_mx);
 	if (g_toast_qn == 8) { std::memmove(g_toast_q, g_toast_q + 1, sizeof g_toast_q[0] * 7); g_toast_qn--; }   /* (a burst: the oldest unseen goes) */
 	Toast &q = g_toast_q[g_toast_qn++];
@@ -1540,6 +1571,7 @@ static void build_closed(void) {
 		if (!in_hot) { g_hot_since = -1; g_hot_block = false; }
 		else if (g_hot_since < 0) g_hot_since = t;
 		if (in_hot && !g_hot_block && t - g_hot_since >= HOT_DWELL_S) { g_bar_want = true; g_bar_active_t = t; }
+		if (g_bar_open_req.exchange(0, std::memory_order_acquire)) { g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t; }   /* the native pull */
 		/* a touch screen has no hover: a tap leaves the "mouse" wherever the finger last landed, for
 		 * good. So on a phone only a finger actually on the glass counts as "the pointer is over the
 		 * bar" (or one of its menus -- those hold it open on their own): the moment the finger lifts,

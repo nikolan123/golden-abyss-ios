@@ -202,7 +202,8 @@ def main(argv):
                     "-D__GCC_DESTRUCTIVE_SIZE=128", "-D__GCC_CONSTRUCTIVE_SIZE=64"]
         FLAGS += iosflags
         # platform_posix.c is the same OS layer macOS and Linux use; ios_shims.m is the compiler-rt the toolchain lacks
-        PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m")]
+        # (the chrome: UIKit's own eye, top pull and toasts -- built for iOS alone, nothing on a desktop)
+        PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m"), os.path.join(ROOT, "runtime", "platform", "ios_ui_chrome.m")]
         FRAMEWORKS = [x for fr in ("UIKit Metal QuartzCore CoreGraphics CoreAudio AudioToolbox AVFoundation "
                                    "CoreVideo CoreMotion CoreMedia CoreBluetooth Foundation GameController OpenGLES "
                                    "VideoToolbox").split()

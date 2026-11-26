@@ -50,8 +50,14 @@
 #if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 extern void ios_safe_insets(float *top, float *bottom, float *left, float *right);
 static void safe_insets(float *t, float *b, float *l, float *r) { ios_safe_insets(t, b, l, r); }
+/* the phone's native chrome (runtime/platform/ios_ui_chrome.m, UIKit's own eye, top pull and toasts;
+ * RECOMP_NATIVE_CHROME=0 there keeps the ImGui-built ones instead of installing any of it) */
+extern void ios_ui_chrome_install(void);
+extern void ios_ui_chrome_place(float x);
+#define IOS_UI_CHROME 1
 #else
 static void safe_insets(float *t, float *b, float *l, float *r) { *t = *b = *l = *r = 0.0f; }
+#define IOS_UI_CHROME 0
 #endif
 #include "framegen/framegen.h"
 
@@ -1001,6 +1007,13 @@ int touchpad_on(void) {
 }
 void touchpad_set_on(int on) { settings_set_int("touchpad", on ? 1 : 0); settings_save(); tp_want_v = -2; tv.w = -1; }   /* (the cache: re-read, the layout: re-made) */
 
+/* the eye's corner x (the leftmost margin, the slot tp_layout stands the leftmost shoulder pill off
+ * from): valid with the pad off too -- the eye is the one control that never goes away, so it must
+ * not derive from a pill that a pad-off layout never has (the chip once did, and went off the glass
+ * at x -54). Filled by every tp_layout; zero before the first one. */
+static float tp_eye_x;
+float touchpad_eye_x(void) { return tp_eye_x; }
+
 /* the layout for a picture of w x h, in pixels. Everything scales with the height, so a phone
  * and a tablet look the same. The sticks sit where a thumb rests, the shoulders where an index
  * finger reaches, and the middle of the screen stays the game's own touch panel.
@@ -1016,7 +1029,6 @@ static void tp_layout(float w, float h) {
 	memset(&tv, 0, sizeof tv);
 	tv.on = touchpad_on(); tv.w = w; tv.h = h; tv.scale = sc; tv.mirror = touchpad_mirror();
 	tv.opacity = settings_int("touchpad_opacity", 42);
-	if (!tv.on) return;
 	float st = 0, sb = 0, sl = 0, sr = 0;   /* the notch and the home indicator */
 	safe_insets(&st, &sb, &sl, &sr);
 	const float clamp = h * 0.030f;
@@ -1024,6 +1036,15 @@ static void tp_layout(float w, float h) {
 	const float ml = m + (sl < clamp ? sl : clamp), mr = m + (sr < clamp ? sr : clamp);
 	const float mb = m + (sb * 0.5f < clamp ? sb * 0.5f : clamp);   /* the home indicator: the corner half-space is clear, and never more than the clamp */
 	const float mt = m + st;
+	{	/* the eye's corner slot, before anything below: the pad off must not leave it behind -- the eye
+		 * is the one control that stays (its tap brings the pad back). Both draw at this margin, the
+		 * native twin (ios_ui_chrome.m) placed here and the ImGui chip (overlay.cpp) reading it. */
+		tp_eye_x = ml;
+#if IOS_UI_CHROME
+		ios_ui_chrome_place(ml);
+#endif
+	}
+	if (!tv.on) return;
 	const float rl = h * 0.140f * sc;          /* the left stick's reach */
 	const float rb = h * 0.055f * sc;          /* a face button */
 	const float gap = rb * 2.2f;
@@ -1058,8 +1079,9 @@ static void tp_layout(float w, float h) {
 	static const char *pad_dbg;
 	if (!pad_dbg) pad_dbg = getenv("RECOMP_PAD_DEBUG");
 	if (pad_dbg && *pad_dbg && *pad_dbg != '0')
-		fprintf(stderr, "    pad layout: %g x %g (insets t%g b%g l%g r%g): stick (%g, %g) r %g; face centre (%g, %g) r %g gap %g; shoulders y %g, h %g; start/select y %g\n",
-		        w, h, st, sb, sl, sr, tv.sl_x, tv.sl_y, tv.sl_r, rx, cy, rb, gap, mt + sh / 2, sh, mt + ph / 2);
+		fprintf(stderr, "    pad layout %g x %g (insets t%g b%g l%g r%g): buttons r %g gap %g; shoulders y %g h %g; eye at x %g; start/select y %g; pockets (a tap is the game's, a hold or a drag spawns its stick): below y %g, the movement stick at x %s %g, the second stick (pack: %d) at x %s %g\n",
+		        w, h, st, sb, sl, sr, rb, gap, mt + sh / 2, sh, ml, mt + ph / 2,
+		        h * 0.50f, tv.mirror ? "above" : "below", (tv.mirror ? 0.58f : 0.42f) * w, window_touchpad_rstick(), tv.mirror ? "below" : "above", (tv.mirror ? 0.42f : 0.58f) * w);
 }
 
 /* which control is at (x,y): a button index + 10, or 0. The sticks no longer claim a landing
@@ -1105,8 +1127,14 @@ static int tp_zone_hold(const SDL_Event *e) {
 		return 0;
 	}
 	if (e->type != SDL_EVENT_FINGER_MOTION || k < 0) return 0;
+	/* the thresholds are a matter of thumb taste, and RECOMP_STICK_DRAG (points) / RECOMP_STICK_HOLD
+	 * (seconds) tune them from env.txt on a device, no rebuild -- the defaults: about half a thumb's
+	 * width, and a sixth of a second. */
+	static float drag_px = -1, hold_s = -1;
+	if (drag_px < 0) { const char *e = getenv("RECOMP_STICK_DRAG"); drag_px = e && *e ? (float)atof(e) : 12.0f; if (drag_px < 3) drag_px = 3; }
+	if (hold_s < 0) { const char *e = getenv("RECOMP_STICK_HOLD"); hold_s = e && *e ? (float)atof(e) : 0.16f; if (hold_s < 0 || hold_s > 1) hold_s = 0.16f; }
 	const double now = tp_now();
-	if (hypotf(x - zwait[k].x, y - zwait[k].y) < 12.0f && now - zwait[k].at < 0.16) return 0;   /* still maybe a tap */
+	if (hypotf(x - zwait[k].x, y - zwait[k].y) < drag_px && now - zwait[k].at < hold_s) return 0;   /* still maybe a tap */
 	const int zone = zwait[k].zone;
 	if ((zone == 1 && tv.sl_active) || (zone == 2 && tv.sr_active)) { zwait[k].id = 0; zwait[k].zone = 0; return 0; }   /* that stick has its thumb already; this finger stays the game's */
 	int slot = -1;
@@ -1149,6 +1177,7 @@ static void tp_release(int which) {
 
 static void tp_clear(void) {
 	memset(tpf, 0, sizeof tpf);
+	memset(zwait, 0, sizeof zwait);   /* a finger waiting to become a stick waits no more: the pad is taken away under the menu */
 	tp_bits = 0;
 	tp_stick[0] = tp_stick[1] = tp_stick[2] = tp_stick[3] = 128;
 	for (int i = 0; i < tv.nb; i++) tv.b[i].down = 0;
@@ -1361,6 +1390,9 @@ void window_run(void *(*fn)(void *), void *arg) {
   { const char *ws = getenv("RECOMP_WINDOW_SIZE"); int a = 0, b = 0;   /* WWxHH: a phone's aspect can be looked at on a desktop */
     if (ws && *ws && sscanf(ws, "%dx%d", &a, &b) == 2 && a >= 320 && b >= 240) { ww = a; wh = b; } }
   win = SDL_CreateWindow(name && *name ? name : "Project Nativ", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY); }
+#if IOS_UI_CHROME
+	ios_ui_chrome_install();   /* UIKit's own chrome on the phone: the eye, the top pull, the toasts -- beside the game's frame, never inside it */
+#endif
 	{	/* the app icon (assets/brand): the install's, as vitarecomp run names it (an AppImage's moves on every start), else
 		 * the one the build saw */
 		const char *ip = getenv("RECOMP_ICON");
