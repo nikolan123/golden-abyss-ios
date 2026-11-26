@@ -643,3 +643,22 @@ state and queued mouse motion; all game input APIs suppress background input.
 Foreground entry resamples the controller, and disconnect/focus loss resets
 the Back/Start shortcut state. Details and verification limits are in
 `docs/ios-ui-test35-followup.md`.
+
+### Step 46 — test37 Metal HUD, compact gear and native host dialogs
+
+Restored the optional Metal HUD with saved startup configuration and restart
+guidance, and placed a gear beneath the eye. Those changes are isolated in
+commit `1780cbb`, following the pre-change checkpoint `ca52ae8`.
+
+Completed the iOS host UI migration: native save tables/questions, messages,
+text entry, wait/progress cards, shader preparation, controller-layout choice,
+quit confirmation and Core Animation touch markers. The normal native path
+no longer initializes ImGui rendering backends or constructs ImGui frames.
+Shared state and the explicit desktop/headless/legacy fallback remain.
+
+Revision-checked answers, borrowed-data copying, dialog polling, text drafts,
+UTF-16 limits and keyboard/controller routing were reviewed. Sanitized state,
+lifecycle, touch-input and viewport tests passed, as did the 184-check system
+dialog suite, iOS build, native Clang analysis and packaged IPA validation.
+See `docs/ios-ui-test37-native.md` for details, artifact identity and the
+remaining physical-device checks.

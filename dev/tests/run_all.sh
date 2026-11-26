@@ -32,6 +32,7 @@ AVC=(); pkg-config --exists libavcodec libavutil 2>/dev/null && AVC=(-DRECOMP_AV
 step "audio decoder (audiodec_test.c)" unit audiodec_test ${AVC[@]+"${AVC[@]}"} $ROOT/third_party/libatrac9/*.c -lm -lpthread
 step "controller button bindings (padbind_test.c)" unit padbind_test ../core/settings.c -lpthread
 step "message and text-input dialogs (commondlg_test.c)" unit commondlg_test -I stub -lpthread
+step "native overlay state and lifecycle (native_overlay_test.py)" $PY dev/tests/native_overlay_test.py
 step "NGS voice rules (ngs_rules_test.c)" unit ngs_rules_test
 step "the microphone (audioin_test.c)" unit audioin_test
 step "the network offline (net_offline_test.c)" unit net_offline_test -lpthread

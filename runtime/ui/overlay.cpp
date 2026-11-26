@@ -47,6 +47,7 @@
 #include "backends/imgui_impl_sdlgpu3.h"
 #include "gpulock.h"   /* the SDL submit below is the locked one, and ImGui's own submits run under the same lock (render_frame): Homebrew SDL 3.4.16's Metal fence race, see that header */
 #include "overlay.h"
+#include "overlay_native.h"
 #include "touchpad.h"
 #include "padbind.h"
 #include "commondlg.h"
@@ -151,6 +152,7 @@ void settings_save(void);
 }
 
 static ImGuiContext *g_ctx;
+static bool g_native_context_only; /* shared state guards use a context; UIKit needs no ImGui platform/GPU backend */
 static SDL_Window *g_window;   /* the window text input starts on (the text-input dialog) */
 static bool g_has_window;      /* overlay_init was given a real SDL_Window: the platform backend is live */
 /* written by the window thread, read by the game thread (display.c's pause, window.c's audio): atomic,
@@ -160,6 +162,7 @@ static std::atomic<bool> g_open, g_want_quit, g_want_capture, g_paused;
 static std::atomic<bool> g_intro;                 /* the touch card is up (the game paused under it) */
 static double g_intro_since;                     /* when the phone's hint strip first showed (build_intro_hint, below) */
 static void intro_end(void); static void build_intro(void);
+static std::atomic<int> g_native_card_seq;
 static std::atomic<bool> g_prep_card;             /* the shader prep card is up (in the menu's open state: the game paused, input to the card) */
 static int g_prep_demo[3] = {-1, 0, 0};           /* RECOMP_OVERLAY_DUMP_UI=prep: the card with these numbers (done, total, seconds left) */
 static void build_prep(void); static void build_prep_corner(float w, float hgt, int done, int total);
@@ -193,6 +196,9 @@ int overlay_init(SDL_GPUDevice *device, SDL_Window *window, SDL_GPUTextureFormat
 	ImGui::SetCurrentContext(g_ctx);
 	ImGuiIO &io = ImGui::GetIO();
 	io.IniFilename = nullptr;   /* never write imgui.ini into the game's own run directory */
+    g_has_window = window != nullptr; g_window = window;
+    g_native_context_only = ios_ui_chrome_active() != 0;
+    if (g_native_context_only) return 1;
 	/* (keyboard/gamepad navigation: set per frame in render_frame -- on with the full menu only) */
 	ui::load_system_font(io);   /* an explicit face: without one, ImGui 1.92's own automatic choice (vector vs. bitmap)
 		depends on a DPI scale the headless path never sets, and picks a degenerate (zero-size) one */
@@ -211,8 +217,8 @@ int overlay_init(SDL_GPUDevice *device, SDL_Window *window, SDL_GPUTextureFormat
 void overlay_shutdown(void) {
 	if (!g_ctx) return;
 	ImGui::SetCurrentContext(g_ctx);
-	ImGui_ImplSDLGPU3_Shutdown();
-	if (g_has_window) ImGui_ImplSDL3_Shutdown();
+	if (!g_native_context_only) { ImGui_ImplSDLGPU3_Shutdown(); if (g_has_window) ImGui_ImplSDL3_Shutdown(); }
+	g_native_context_only = false;
 	ImGui::DestroyContext(g_ctx);
 	g_ctx = nullptr; g_has_window = false; g_open = false; g_want_quit = false; g_want_capture = false; g_paused = false;
 }
@@ -249,7 +255,7 @@ int overlay_game_paused(void) { return g_ctx && (g_open || g_paused); }
 int overlay_wants_quit(void) { return g_want_quit.exchange(false); }
 int overlay_quit_confirm(void) {   /* (window.c, on a request to close the window) 1: the card is up now; 0: it already was, or can't be: quit */
 	if (!g_ctx || !g_has_window || g_quit_card) return 0;
-	g_quit_card = true; overlay_open(); return 1;
+	g_quit_card = true; ++g_native_card_seq; overlay_open(); return 1;
 }
 /* quitting a game the launcher started (ATIV_LAUNCHER, hub.cpp) returns to the launcher's library, which comes to the
  * front: the button says so */
@@ -267,6 +273,7 @@ static const char *pad_action_label(int a) {
 	return a >= PBA_L2 ? extra[a - PBA_L2] : window_kb_label(a + 4);
 }
 void overlay_process_event(const SDL_Event *event) {
+	if (ios_ui_chrome_active()) return;
 	if (!g_ctx || !g_has_window) return;
 	if (g_rebind >= 0 && event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat) { window_kb_bind(g_rebind, event->key.key); g_rebind = -1; return; }   /* (Escape cancels, F10 closes the menu: window.c) */
 	if (g_prebind >= 0 && g_prebind_end == 0) {   /* (Guide opens and closes the menu before it gets here, and has no input in padbind.h) */
@@ -839,7 +846,7 @@ static bool g_skip_draw;                /* overlay_render_forced's warm-up frame
 static float g_bar_h;                   /* the bar's height this frame, in points (0: none drawn) -- the HUD moves down by it */
 
 void overlay_bar_dismiss(void) { if (!g_ctx) return; if (g_intro) intro_end(); else g_dismiss_req = true; }   /* (Escape: the touch card skipped, else the bar away) */
-int overlay_mouse_captured(void) { return g_ctx && g_has_window && g_mouse_captured; }
+int overlay_mouse_captured(void) { if (ios_ui_chrome_active()) return 0; return g_ctx && g_has_window && g_mouse_captured; }
 /* a finger landing at this point (window.c's finger events, in the display's point units): is it on the
  * overlay's own controls -- the menu bar while it's down, one of its menus, the pull tab, the game's own
  * dialogs (save data, a message, text)? On a phone every tap is *also* the game's; nothing above knew
@@ -881,6 +888,7 @@ extern "C" int overlay_finger_nav(float x, float y) {
 	return 0;
 }
 extern "C" int overlay_owns_point(float x, float y) {
+	if (ios_ui_chrome_active()) return 0;
 	if (!g_ctx || !g_has_window) return 0;
 	ImGui::SetCurrentContext(g_ctx);
 	ImGuiContext &ctx = *ImGui::GetCurrentContext();
@@ -900,13 +908,15 @@ extern "C" int overlay_owns_point(float x, float y) {
  * bar down, 8 one of its popups -- so the chrome's log can say *why*, not just that. */
 extern "C" int overlay_pad_hidden(void) {
 	if (!g_ctx || !g_has_window) return 0;
+    if (ios_ui_chrome_active()) return (g_open ? 1 : 0) | (g_intro ? 2 : 0) | (overlay_dialog_active() ? 8 : 0);
+
 	ImGui::SetCurrentContext(g_ctx);
 	ImGuiContext &ctx = *ImGui::GetCurrentContext();
 	int bits = 0;
 	if (g_open) bits |= 1;
 	if (g_intro) bits |= 2;
 	if (!ios_ui_chrome_active() && g_bar_vis > 0.01f) bits |= 4;
-	if (!ctx.OpenPopupStack.empty() || overlay_dialog_active()) bits |= 8;
+	if ((!ios_ui_chrome_active() && !ctx.OpenPopupStack.empty()) || overlay_dialog_active()) bits |= 8;
 	return bits;
 }
 
@@ -1359,7 +1369,8 @@ static int g_sd_seq = -1, g_sd_sel; static bool g_sd_armed;
 int overlay_dialog_active(void) {
 	if (!g_ctx || !g_has_window) return 0;
 	SaveDlgView v; const int k = savedlg_view(&v); savedlg_release();
-	return k == SAVEDLG_LIST || k == SAVEDLG_YESNO || cdlg_active();
+	MsgDlgView m; const int mk = msgdlg_view(&m); msgdlg_release();
+	return k != SAVEDLG_NONE || mk != 0 || cdlg_active();
 }
 static const ImGuiKey K_UP[] = {ImGuiKey_UpArrow, ImGuiKey_W, ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadLStickUp};
 static const ImGuiKey K_DOWN[] = {ImGuiKey_DownArrow, ImGuiKey_S, ImGuiKey_GamepadDpadDown, ImGuiKey_GamepadLStickDown};
@@ -1710,8 +1721,8 @@ static void build_closed(void) {
 	}
 	if (g_has_window) {   /* the shader prep (gfx_gpu.c): the card when it asks (after the touch card), the corner line while skipped, a toast when done */
 		int done, total; double eta; const int ps = gfx_gpu_shader_prep(&done, &total, &eta);
-		if (g_layout_ask && !g_layout_card && !g_intro && !g_open) { g_layout_card = true; g_open = true; apply_pause(); }   /* (the game waits for it: before the prep card) */
-		else if (ps == 1 && !g_intro && !g_open && !g_layout_card) { g_prep_card = true; g_open = true; apply_pause(); }
+		if (g_layout_ask && !g_layout_card && !g_intro && !g_open) { g_layout_card = true; ++g_native_card_seq; g_open = true; apply_pause(); }   /* (the game waits for it: before the prep card) */
+		else if (ps == 1 && !g_intro && !g_open && !g_layout_card) { g_prep_card = true; ++g_native_card_seq; g_open = true; apply_pause(); }
 		else if (ps == 2 && total > 0) build_prep_corner(w, hgt, done, total);
 		else if (ps == 3) overlay_toast_titled("Shaders ready", "Built for this computer: no more pauses to build them.", 4.0);
 	}
@@ -2171,6 +2182,35 @@ static void build_layout(void) {
 	ImGui::PopStyleVar();
 	if (chosen) layout_choose(chosen);
 }
+/* UIKit drives the host state machine without constructing an ImGui frame. */
+extern "C" void overlay_native_state(NativeOverlayState *state) {
+    memset(state, 0, sizeof *state);
+    if (!g_ctx || !g_has_window) return;
+    if (!g_toast_checked && !g_open) {
+        g_toast_checked = true;
+        if (!settings_has("touch_intro_shown")) g_intro = true;
+    }
+    const int ps = gfx_gpu_shader_prep(&state->done, &state->total, &state->eta);
+    state->prep_state = ps;
+    if (g_prep_card && ps != 1) {
+        g_prep_card = false; g_open = g_quit_card || g_layout_card; g_paused = false; apply_pause();
+    }
+    if (g_layout_ask && !g_layout_card && !g_intro && !g_open && !overlay_dialog_active()) {
+        g_layout_card = true; ++g_native_card_seq; g_open = true; apply_pause();
+    } else if (ps == 1 && !g_intro && !g_open && !g_layout_card && !overlay_dialog_active()) {
+        g_prep_card = true; ++g_native_card_seq; g_open = true; apply_pause();
+    }
+    if (ps == 3) overlay_toast_titled("Shaders ready", "Ready to play.", 3);
+    state->kind = g_quit_card ? NATIVE_CARD_QUIT : g_layout_card ? NATIVE_CARD_LAYOUT : g_prep_card ? NATIVE_CARD_PREP : NATIVE_CARD_NONE;
+    state->seq = g_native_card_seq;
+}
+extern "C" void overlay_native_answer(int kind, int seq, int choice, int remember) {
+    if (seq != g_native_card_seq) return;
+    if (kind == NATIVE_CARD_QUIT && g_quit_card) { if (choice) g_want_quit = true; else overlay_close(); }
+    else if (kind == NATIVE_CARD_LAYOUT && g_layout_card) {
+        g_layout_remember = remember != 0; layout_choose(choice == 2 ? 2 : 1);
+    } else if (kind == NATIVE_CARD_PREP && g_prep_card) overlay_close();
+}
 extern "C" int overlay_layout_ask(void) {   /* (the game's thread) */
 	if (!g_ctx || !g_has_window) return 1;
 	g_layout_answer = 0; g_layout_ask = 1;
@@ -2200,10 +2240,15 @@ static void build_quit(void) {
 	ImGui::PopStyleVar();
 }
 void overlay_frame(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *target, uint32_t w, uint32_t h, double dt_s) {
+	if (ios_ui_chrome_active()) return;
 	if (!overlay_is_open()) return;
 	render_frame(cmd, target, w, h, dt_s, g_has_window, g_quit_card ? build_quit : g_layout_card ? build_layout : g_prep_card ? build_prep : build_ui);
 }
 void overlay_marks(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *target, uint32_t w, uint32_t h, double dt_s, const OverlayMark *marks, int n, const float rear_rect[4]) {
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+    if (ios_ui_chrome_active()) { ios_ui_chrome_marks(marks, n, rear_rect); return; }
+#endif
+
 	if (overlay_is_open()) return;   /* the menu has its own fps line (page_performance) */
 	g_nosd = metrics_osd_lines(g_osd, 7);
 	/* headless (the dump's HUD check): only with something to show. Windowed: every present -- the bar's
@@ -2231,6 +2276,7 @@ static void forced_frame(SDL_GPUDevice *device, SDL_GPUTexture *target, uint32_t
 	g_skip_draw = false;
 }
 void overlay_render_forced(SDL_GPUDevice *device, SDL_GPUTexture *target, uint32_t w, uint32_t h, const char *ui) {
+	if (g_native_context_only) return; /* UIKit is captured by iOS, not the legacy offscreen ImGui dump. */
 	if (!g_ctx || !device) return;
 	g_nmarks = 0; g_rear[2] = 0; g_nosd = 0;
 	if (!ui || !*ui || !strncmp(ui, "menu", 4)) {

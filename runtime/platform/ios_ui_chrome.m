@@ -63,11 +63,7 @@ static UIView       *g_toast_host;   /* the corner the toasts stack into, owned 
 static UIStackView  *g_toast_stack;  /* the toasts, newest on top, the oldest past three */
 static int           g_installed;    /* ios_ui_chrome_install ran: everything's in place */
 static int           g_eye_on = -1;  /* what the eye last drew: the menu's toggle must reach it too */
-static int           g_pad_disabled;      /* RECOMP_NATIVE_PAD=0: the native pad stands down (the ImGui pad draws, the finger path owns the taps) */
-
-/* while the chrome is installed this is the pad's own word: overlay.cpp gates pad_draw on it, so
- * a disabled native pad is the *whole* ImGui pad exactly as before, not a blank screen */
-int ios_ui_chrome_pad_on(void) { return g_installed && !g_pad_disabled; }
+int ios_ui_chrome_pad_on(void) { return g_installed; }
 
 int ios_ui_chrome_active(void) { return g_installed; }
 
@@ -1451,11 +1447,6 @@ void ios_ui_pad_layout(void) {
 	if (!g_installed || !g_win) return;
 	if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_pad_layout(); }); return; }
 	const TpVisual *tv = touchpad_visuals();
-	if (g_pad_disabled) {   /* theImGui pad is drawing: nothing of ours may take a touch or a pixel */
-		g_pad_layer.hidden = YES;
-		for (int i = 0; i < 8; i++) if (g_pad_hits[i]) g_pad_hits[i].hidden = YES;
-		return;
-	}
 	g_pad_layer.hidden = !tv->on;   /* (its drawing checks the same flag: this hides the canvas itself) */
 	chrome_log("    chrome: pad layout (%s) %d buttons, canvas %.0fx%.0f at (%.0f, %.0f)", tv->on ? "on" : "off", tv->nb,
 	           g_pad_layer.bounds.size.width, g_pad_layer.bounds.size.height, g_pad_layer.frame.origin.x, g_pad_layer.frame.origin.y);
@@ -1490,6 +1481,15 @@ void ios_ui_pad_layout(void) {
 @end
 static ChromeCenter *g_center;
 
+#include "ios_ui_dialogs.inc"
+
+int ios_ui_chrome_handle_event(const SDL_Event *event) {
+    if (!g_installed) return 0;
+    if (nd_handle_event(event)) return 1;
+    if (bar_visible() && event->type == SDL_EVENT_KEY_DOWN && event->key.key == SDLK_ESCAPE) { bar_up_close_all(); return 1; }
+    return 0;
+}
+
 @implementation ChromeCenter
 - (void)eye:(id)sender {
 	(void)sender;
@@ -1507,6 +1507,7 @@ static ChromeCenter *g_center;
 - (void)tick:(CADisplayLink *)link {
     (void)link;
     if (!g_installed || [UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
+    nd_tick();
     if (!g_win.rootViewController.presentedViewController && g_win.subviews.lastObject != g_host) [g_win bringSubviewToFront:g_host];
     chrome_layout();
     if (g_eye) eye_look();
@@ -1516,10 +1517,10 @@ static ChromeCenter *g_center;
     const BOOL hidePad = !touchpad_on() || reasons || bar_visible();
     for (int i = 0; i < 8; i++) if (g_pad_hits[i]) {
         if (hidePad && g_pad_hits[i]->down) { g_pad_hits[i]->down = 0; touchpad_native_release(10 + i); }
-        g_pad_hits[i].hidden = hidePad || g_pad_disabled;
+        g_pad_hits[i].hidden = hidePad;
     }
-    if (g_pad_layer && !g_pad_disabled) [g_pad_layer sync];
-    /* A controller or keyboard can open/close the same settings state. Special game cards remain ImGui. */
+    if (g_pad_layer) [g_pad_layer sync];
+    /* A controller or keyboard can open/close the same UIKit settings state. */
     const BOOL wantsSettings = overlay_native_settings_wanted();
     if (wantsSettings && (!g_cfg_card || g_cfg_card.hidden)) ios_ui_settings_open(overlay_native_settings_page());
     if (!wantsSettings) cfg_picker_dismiss();
@@ -1615,7 +1616,7 @@ int ios_ui_chrome_sync_window(int logical_w, int logical_h, int text_input, int 
     const CGRect frame = [game.superview convertRect:bounds fromView:g_win];
     const CGRect actual = game.frame;
     CAMetalLayer *metal = (CAMetalLayer *)game.layer;
-    const BOOL blocked = text_input || controller.transitionCoordinator || controller.presentedViewController ||
+    const BOOL blocked = text_input || nd_text_active() || controller.transitionCoordinator || controller.presentedViewController ||
         !CGAffineTransformIsIdentity(game.transform) || [UIApplication sharedApplication].applicationState != UIApplicationStateActive;
     const IosViewportPlan plan = ios_viewport_plan(
         (IosViewRect){frame.origin.x, frame.origin.y, frame.size.width, frame.size.height},
@@ -1645,6 +1646,13 @@ void ios_ui_chrome_install(void *native_window) {
     g_win = (UIWindow *)native_window;
     const char *off = getenv("RECOMP_NATIVE_CHROME");
     if (off && off[0] == '0' && off[1] == '\0') return;
+    /* The old pad-only fallback now selects the entire legacy renderer, so its
+     * visible artwork and input areas always use the same implementation. */
+    const char *np = getenv("RECOMP_NATIVE_PAD");
+    if (np && np[0] == '0' && np[1] == '\0') {
+        chrome_log("    chrome: RECOMP_NATIVE_PAD=0 selects the complete legacy UI");
+        return;
+    }
     UIWindow *win = g_win;
     g_host = [[ChromeHost alloc] initWithFrame:win.bounds];
     g_host.backgroundColor = [UIColor clearColor];
@@ -1652,12 +1660,8 @@ void ios_ui_chrome_install(void *native_window) {
     g_host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [win addSubview:g_host]; [g_host release];
 
-	{
-		const char *np = getenv("RECOMP_NATIVE_PAD");   /* =0: the native pad never comes up (the ImGui pad and the finger path again) */
-		g_pad_disabled = np && np[0] == '0' && np[1] == '\0';
-	}
-	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p (%s); pad %s)", win, win.bounds.size.width, win.bounds.size.height,
-	           g_host, "chrome container", g_pad_disabled ? "OFF (RECOMP_NATIVE_PAD=0)" : "on");
+	chrome_log("    chrome: install (window %p, %.0fx%.0f bounds; host %p (%s); pad on)", win, win.bounds.size.width, win.bounds.size.height,
+	           g_host, "chrome container");
 
 	g_center = [[ChromeCenter alloc] init];   /* kept: UIKit's targets and delegates don't retain */
 	g_eye = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
@@ -1735,7 +1739,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test36 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test37 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill

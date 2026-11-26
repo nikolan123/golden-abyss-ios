@@ -41,6 +41,7 @@
 #include "metrics.h"
 #include "settings.h"
 #include "overlay.h"
+#include "overlay_native.h"
 #include "padbind.h"
 #include "touchpad.h"
 #if defined(__APPLE__)
@@ -1480,11 +1481,12 @@ void window_run(void *(*fn)(void *), void *arg) {
 	{ char b[16]; settings_str("aspect", "fit", b, sizeof b);
 	  aspect_mode = !strcmp(b, "stretch") ? ASPECT_STRETCH : !strcmp(b, "fill") ? ASPECT_FILL : ASPECT_FIT; }   /* window_set_aspect also saves: read it in directly instead, nothing changed yet */
 	if (settings_int("fullscreen", 0)) SDL_SetWindowFullscreen(win, true);
-	if (gpu) overlay_init(gpu, win, SDL_GetGPUSwapchainTextureFormat(gpu, win));
 #if IOS_UI_CHROME
     /* Claiming the GPU replaces SDL's root UIView. Install above the final view. */
     if (win) ios_ui_chrome_install(SDL_GetPointerProperty(SDL_GetWindowProperties(win), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL));
 #endif
+	if (gpu) overlay_init(gpu, win, SDL_GetGPUSwapchainTextureFormat(gpu, win));
+
     if (win) { int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h); touchpad_layout_for(w, h); }
 
 	SDL_Gamepad *pad = 0;
@@ -1503,6 +1505,10 @@ void window_run(void *(*fn)(void *), void *arg) {
         if (win) { int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h); touchpad_layout_for(w, h); }
         finger_script();
 		while (SDL_PollEvent(&e)) {
+#if IOS_UI_CHROME
+            if (ios_ui_chrome_handle_event(&e)) continue;
+#endif
+
             if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST || e.type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
                 __atomic_store_n(&input_focused, 0, __ATOMIC_RELEASE);
                 window_clear_input(); pad_back = pad_start = pad_combo_latch = 0;
