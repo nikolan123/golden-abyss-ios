@@ -558,3 +558,21 @@ Three from the phone's report, all clean:
   is iOS's own -- notifications -- and a tap was the old tab's own
   way in). It stands down with the pad: while the strip is down,
   a menu is open, or the intro is up, it hides with the eye.
+
+### Step 41 — the panel's top, the eye's glyph
+
+- test30's panel opened at y -10, its header cut by the screen's
+  edge ("the new menu is out of bounds"): bar_panel_rebuild set
+  the panel's BOUNDS, and a bounds-set keeps the centre -- the
+  origin slid up by half the size delta. The rebuild sizes by
+  FRAME now, the origin captured first; the panel's top sits at
+  the strip's bottom where it was drawn to be.
+- The eye's glyph never drew: UIImage's SF Symbols don't render
+  in this environment (the eye chip was the "circle thing that
+  does absolutely nothing" of the earlier rounds, and test30's
+  pill had no chevron in it -- both glyphs come from
+  systemImageNamed). Nothing depends on them now: the eye is two
+  arcs and a dot, the pill's chevron two lines, drawn by hand
+  into images at install; the eye chip's hairline and fill
+  stepped up too (40% border, 0.72 fill) so it is findable on a
+  black scene as well as a bright one.

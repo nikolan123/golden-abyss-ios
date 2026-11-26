@@ -92,19 +92,53 @@ static void chrome_log(const char *fmt, ...) {
 	va_end(ap);
 }
 static double chrome_now(void) { return (double)(int64_t)(CFAbsoluteTimeGetCurrent() + 978307200.0); }   /* the game's own clock: unix seconds */
+static UIColor *rgba(int r, int g, int b, float a);   /* defined below the pad section: the glyphs ask for it first */
 
 /* ---- the eye ---------------------------------------------------------------------------- */
+/* the chrome's glyphs, drawn by hand: SF Symbols never showed here (the eye rendered as a bare dark
+ * chip -- "the circle thing that does absolutely nothing", and test30's pill had no chevron in it), so
+ * nothing depends on them anymore: an eye is two arcs and a dot, a chevron two lines, our own paths */
+static UIImage *glyph(NSString *kind, CGFloat w, CGFloat h, UIColor *stroke) {
+	UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(w, h)];
+	UIImage *im = [r imageWithActions:^(UIGraphicsImageRendererContext *rc) {
+		CGContextRef c = rc.CGContext;
+		CGContextSetStrokeColorWithColor(c, stroke.CGColor);
+		CGContextSetFillColorWithColor(c, stroke.CGColor);
+		CGContextSetLineWidth(c, 1.8f);
+		CGContextSetLineCap(c, kCGLineCapRound);
+		CGContextSetLineJoin(c, kCGLineJoinRound);
+		if ([kind isEqualToString:@"eye"] || [kind isEqualToString:@"eye.slash"]) {
+			UIBezierPath *p = [UIBezierPath bezierPath];
+			[p moveToPoint:CGPointMake(1.5f, h * 0.5f)];
+			[p addQuadCurveToPoint:CGPointMake(w - 1.5f, h * 0.5f) controlPoint:CGPointMake(w * 0.5f, -h * 0.30f)];
+			[p addQuadCurveToPoint:CGPointMake(1.5f, h * 0.5f) controlPoint:CGPointMake(w * 0.5f, h * 1.30f)];
+			[p stroke];
+			[[UIBezierPath bezierPathWithOvalInRect:CGRectMake(w * 0.5f - 2.6f, h * 0.5f - 2.6f, 5.2f, 5.2f)] fill];
+			if ([kind isEqualToString:@"eye.slash"]) {
+				UIBezierPath *s = [UIBezierPath bezierPath];
+				[s moveToPoint:CGPointMake(1.0f, h - 1.0f)];
+				[s addLineToPoint:CGPointMake(w - 1.0f, 1.0f)];
+				[s stroke];
+			}
+		} else if ([kind isEqualToString:@"chevron"]) {
+			UIBezierPath *p = [UIBezierPath bezierPath];
+			[p moveToPoint:CGPointMake(w * 0.26f, h * 0.40f)];
+			[p addLineToPoint:CGPointMake(w * 0.5f, h * 0.66f)];
+			[p addLineToPoint:CGPointMake(w * 0.74f, h * 0.40f)];
+			[p stroke];
+		}
+	}];
+	[r release];
+	return im;
+}
 static void eye_look(void) {
 	const int on = touchpad_on();
 	if (on == g_eye_on) return;
 	g_eye_on = on;
-	UIImage *img = [UIImage systemImageNamed:(on ? @"eye" : @"eye.slash")];
-	UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14.0 weight:UIImageSymbolWeightMedium];
-	img = [img imageByApplyingSymbolConfiguration:cfg];   /* nil-safe: same name, same size, or the plain glyph */
+	UIImage *img = glyph(on ? @"eye" : @"eye.slash", 24.0f, 15.0f,
+	                      on ? rgba(235, 240, 255, 0.92f) : rgba(160, 166, 180, 0.85f));
 	[g_eye setImage:img forState:UIControlStateNormal];
-	g_eye.tintColor = on ? [UIColor colorWithRed:0.92f green:0.94f blue:1.00f alpha:0.88f]
-	                     : [UIColor colorWithRed:0.59f green:0.61f blue:0.67f alpha:0.78f];
-	g_eye.backgroundColor = [UIColor colorWithWhite:0.118f alpha:(on ? 0.62f : 0.44f)];
+	g_eye.backgroundColor = [UIColor colorWithWhite:0.13f alpha:(on ? 0.72f : 0.52f)];
 }
 
 /* ---- the pad: UIKit's own buttons, and the picture drawn ---------------------------------- */
@@ -607,10 +641,11 @@ static void bar_panel_rebuild(void) {
 	for (UIView *v in [g_panel subviews]) [v removeFromSuperview];
 	const int tab = g_panel_tab;
 	const CGFloat widths[3] = { 250.0f, 250.0f, 300.0f };
-	CGFloat w = widths[tab];
-	g_panel.bounds = CGRectMake(0, 0, w, 100);
+	const CGFloat w = widths[tab];
+	const CGPoint at = g_panel.frame.origin;   /* captured before any size change: setting bounds (as test29 did) slides the top up by half the size delta -- the panel opened at y -10, its header cut by the screen's edge */
+	g_panel.frame = CGRectMake(at.x, at.y, w, 100.0f);   /* frame, never bounds: the top stays at the strip's bottom */
 	const CGFloat h = panel_rows(tab);
-	[g_panel setFrame:CGRectMake(g_panel.frame.origin.x, g_panel.frame.origin.y, w, h)];
+	g_panel.frame = CGRectMake(at.x, at.y, w, h);
 }
 
 static void bar_panel_open(int tab) {
@@ -1452,8 +1487,8 @@ void ios_ui_chrome_install(void) {
 	g_eye = [[UIButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
 	g_eye.frame = CGRectMake(8.0f, 1.0f, 46.0f, 26.0f);   /* tp_layout's own call moves it to the corner's margin */
 	g_eye.layer.cornerRadius = 11.0f;
-	g_eye.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.24f].CGColor;   /* the chip's hairline */
-	g_eye.layer.borderWidth = 0.5f;
+	g_eye.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.40f].CGColor;   /* the chip's hairline (40%: findable on a black scene too -- test30's 24% vanished into the game's letterbox) */
+	g_eye.layer.borderWidth = 0.75f;
 	[g_eye addTarget:g_center action:@selector(eye:) forControlEvents:UIControlEventTouchUpInside];
 	[g_host addSubview:g_eye];
 	[g_host bringSubviewToFront:g_eye];
@@ -1469,12 +1504,9 @@ void ios_ui_chrome_install(void) {
 		g_pull_pill.layer.backgroundColor = rgba(20, 22, 28, 0.55f).CGColor;
 		g_pull_pill.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.20f].CGColor;
 		g_pull_pill.layer.borderWidth = 0.5f;
-		UIImage *chev = [UIImage systemImageNamed:@"chevron.down"];
-		if (chev) {
-			chev = [chev imageWithTintColor:[UIColor colorWithWhite:1.0f alpha:0.60f] renderingMode:UIImageRenderingModeAlwaysOriginal];
-			[g_pull_pill setImage:chev forState:UIControlStateNormal];
-			g_pull_pill.imageView.contentMode = UIViewContentModeCenter;
-		}
+		UIImage *chev = glyph(@"chevron", 12.0f, 8.0f, [UIColor colorWithWhite:1.0f alpha:0.65f]);
+		[g_pull_pill setImage:chev forState:UIControlStateNormal];
+		g_pull_pill.imageView.contentMode = UIViewContentModeCenter;
 		[g_pull_pill addTarget:g_center action:@selector(pill:) forControlEvents:UIControlEventTouchUpInside];
 		[g_host addSubview:g_pull_pill];
 		[g_pull_pill release];
