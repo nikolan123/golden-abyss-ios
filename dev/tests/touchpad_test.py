@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / 'runtime/ui/window.c').read_text(encoding='utf-8')
 PAD = SOURCE.split('/* ---- the on-screen pad (touchpad.h):', 1)[1]
 PAD = PAD[PAD.index('#include <math.h>'):].split('\nvoid window_input(', 1)[0]
+WINDOW_INPUT = SOURCE[SOURCE.index('void window_input('):SOURCE.index('/* the Vita input an action presses')]
+RELEASE = SOURCE[SOURCE.index('static void gamepad_touch_release(void) {'):SOURCE.index('/* A touchscreen (SDL')]
+CLEAR = SOURCE[SOURCE.index('static void window_clear_input(void) {'):SOURCE.index('\n#if IOS_UI_CHROME\nstatic void ios_window_geometry_tick')]
+CONTACTS = SOURCE[SOURCE.index('static int last_touch_key[2]'):SOURCE.index('static int clampi(')]
+MOUSE = SOURCE[SOURCE.index('int window_mouse_delta(float *dx'):SOURCE.index('float window_mouse_sens(')]
 ADAPTERS = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -28,7 +33,8 @@ typedef uint64_t SDL_FingerID;
 typedef uint64_t SDL_TouchID;
 enum { SDL_EVENT_FINGER_DOWN=1, SDL_EVENT_FINGER_UP, SDL_EVENT_FINGER_MOTION, SDL_EVENT_FINGER_CANCELED };
 typedef struct { int type; struct { SDL_FingerID fingerID; float x, y; } tfinger; } SDL_Event;
-enum { SELECT=1, START=8, LTRIG=0x100, RTRIG=0x200, TRIANGLE=0x1000, CIRCLE=0x2000, CROSS=0x4000, SQUARE=0x8000 };
+enum { SELECT=1, START=8, LTRIG=0x100, RTRIG=0x200, TRIANGLE=0x1000, CIRCLE=0x2000, CROSS=0x4000, SQUARE=0x8000,
+       L1=0x400, R1=0x800, L3=2, R3=4, PAD_L2=0x10000, PAD_R2=0x20000 };
 static const char *keys[] = {"touchpad", "touchpad_scale", "touchpad_left", "touchpad_opacity", "touchpad_rstick"};
 static int values[] = {1,100,0,42,1};
 static int key_index(const char *key) { for (int i=0;i<5;i++) if (!strcmp(key,keys[i])) return i; return -1; }
@@ -48,6 +54,31 @@ static int overlay_dialog_active(void) { return dialog; }
 static int st_down[10], hold_st[10];
 static SDL_FingerID st_id[10];
 static int hold_release(int *p) { *p=0; return 1; }
+static int hold_due(int *p) { (void)p; return 0; }
+#define TP_FINGERS 6
+#define KB_N 4
+static int tp_down[TP_FINGERS], input_focused=1, buttons, touch_down;
+static uint8_t sticks[4]={128,128,128,128};
+static int16_t pad_raw[4];
+static int cur_mode, cur_down, lb_held, rb_held, ltrig_on, rtrig_on, ptrig[2];
+static int cur2_on, cur_used_l, cur_used_r, cur_cross, cur_trig[2], trig_touch[2];
+static int twist_pad, twist_down, twist_drag, mouse_rear_down, gesture_drag, flick_down;
+static int kbm_lmb, kbm_rmb, look_dx_q8, look_dy_q8, mouse_dx_q8, mouse_dy_q8;
+static int kbm_on, pad_gyro, tilt_section, motion_pauses, native_cancels;
+static int touch_x, touch_y, mouse_rear_x, mouse_rear_y, hold_mouse[2];
+static int cur_x[2],cur_y[2],cur2_x[2],cur2_y[2],flick_x,flick_y,twist_x[2],twist_y[2];
+static int tp_port[TP_FINGERS],tp_x[TP_FINGERS],tp_y[TP_FINGERS],hold_tp[TP_FINGERS];
+static int st_port[ST_FINGERS],st_x[ST_FINGERS],st_y[ST_FINGERS];
+static int rel_on=1,script_reads;
+static uint64_t raw_taken_us;
+static uint64_t now_us(void) { return clock_ns/1000; }
+static int mouse_script(float *x,float *y) { script_reads++; *x=*y=0; return 0; }
+static struct { int held; } kb_binds[KB_N];
+static void motion_pause(void) { motion_pauses++; }
+static void ios_ui_chrome_cancel_controls(void) { native_cancels++; }
+static int touchpad_active(void) { for(int i=0;i<TP_FINGERS;i++) if(tp_down[i]) return 1; return 0; }
+static int gesture_wanted(void) { return 0; }
+static int twist_wanted(void) { return 0; }
 static int pad_dbg(void);
 static void ios_ui_chrome_place(float x);
 static void ios_ui_pad_layout(void);
@@ -160,12 +191,37 @@ static void publication(void) {
     __atomic_store_n(&stop,1,__ATOMIC_RELEASE); pthread_join(reader,NULL); neutral();
     puts("PASS: 200,000 complete cross-thread input publications");
 }
-int main(void) { geometry(); input(); holds(); publication(); return 0; }
+static void focus(void) {
+    input_focused=0; buttons=LTRIG|RTRIG|PAD_L2|PAD_R2;
+    uint32_t bits=~0u; uint8_t axes[4]={0,0,255,255};
+    window_input(&bits,axes); assert(!bits);
+    for(int i=0;i<4;i++) assert(axes[i]==128);
+    window_input_pad2(&bits,axes); assert(!bits); /* no shoulder bits reintroduced by PS TV mapping */
+    touch_down=1; int keys[8],xs[8],ys[8];
+    assert(!window_touch_contacts(0,keys,xs,ys,8));
+    mouse_dx_q8=512; mouse_dy_q8=-256; float dx=99,dy=99;
+    assert(!window_mouse_delta(&dx,&dy) && dx==0 && dy==0 && !script_reads);
+    for(int i=0;i<4;i++) { sticks[i]=255; pad_raw[i]=32767; kb_binds[i].held=1; }
+    touch_down=flick_down=gesture_drag=twist_drag=twist_pad=twist_down=1;
+    kbm_lmb=kbm_rmb=look_dx_q8=look_dy_q8=mouse_dx_q8=mouse_dy_q8=99;
+    window_clear_input();
+    assert(!buttons && !touch_down && !flick_down && !gesture_drag && !twist_drag && !twist_pad && !twist_down);
+    assert(!kbm_lmb && !kbm_rmb && !look_dx_q8 && !look_dy_q8 && !mouse_dx_q8 && !mouse_dy_q8);
+    for(int i=0;i<4;i++) assert(sticks[i]==128 && !pad_raw[i] && !kb_binds[i].held);
+    assert(motion_pauses && native_cancels); input_focused=1; neutral();
+    mouse_dx_q8=512; mouse_dy_q8=-256;
+    assert(window_mouse_delta(&dx,&dy) && dx==2 && dy==-1);
+    touch_down=1; touch_x=321; touch_y=654;
+    assert(window_touch_contacts(0,keys,xs,ys,8)==1 && keys[0]==1 && xs[0]==321 && ys[0]==654);
+    window_clear_input();
+    puts("PASS: background buttons/axes/touch/raw-mouse suppression, PS TV mapping and full gesture/key release");
+}
+int main(void) { geometry(); input(); holds(); publication(); focus(); return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='nativ-touchpad-') as folder:
     source = Path(folder) / 'test.c'
     binary = Path(folder) / 'test'
-    source.write_text(ADAPTERS + PAD + TESTS, encoding='utf-8')
+    source.write_text(ADAPTERS + RELEASE + CONTACTS + MOUSE + PAD + WINDOW_INPUT + CLEAR + TESTS, encoding='utf-8')
     command = [os.environ.get('CC', 'cc'), '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-I', str(ROOT / 'runtime/ui'),
                str(source), '-lm', '-pthread', '-o', str(binary)]

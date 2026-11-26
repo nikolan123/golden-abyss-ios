@@ -628,3 +628,18 @@ action lifetimes, reusable settings cells, native settings state integration,
 dialog ownership and small cached control images instead of full-screen
 Retina repaints. Sanitized tests cover 96 layouts and 200,000 concurrent
 input publications. This Windows host cannot verify real UIKit rendering.
+
+### Step 45 — test35 lifecycle follow-up
+
+The continued review found that test34's geometry repair could fight SDL's
+deliberate keyboard displacement, and that SDL_SetWindowSize cannot repair
+the cached logical size on iOS (UIKit_SetWindowSize is a no-op there).
+Reconciliation now defers during text entry, transforms and presentations,
+and asks UIKit for a fresh layout when only SDL's logical dimensions are stale.
+
+Native choice sheets now close with their settings page and reject callbacks
+for retired rows. Focus loss clears physical axes, virtual gestures, keyboard
+state and queued mouse motion; all game input APIs suppress background input.
+Foreground entry resamples the controller, and disconnect/focus loss resets
+the Back/Start shortcut state. Details and verification limits are in
+`docs/ios-ui-test35-followup.md`.

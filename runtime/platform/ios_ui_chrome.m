@@ -7,6 +7,7 @@
 #import <Metal/Metal.h>
 #include <stdlib.h>
 #include <math.h>
+#include "ios_viewport.h"
 #include "../ui/touchpad.h"   /* runtime/ui/touchpad.h: the one true layout -- tp_layout's own TpVisual */
 
 /* the game's own (window.c / overlay.cpp) */
@@ -875,6 +876,20 @@ static UITableView *g_cfg_tbl;
 static NSMutableArray *g_cfg_rows;   /* the open page's CfgRow models */
 static int g_cfg_page = -1;         /* the open page (-1: closed) */
 static int g_cfg_last_page;
+static UIAlertController *g_cfg_picker; /* owned until choice, cancellation or settings close */
+@class CfgCenter;
+static CfgCenter *g_cfg_center;
+static void cfg_picker_finished(UIAlertController *picker) {
+    if (g_cfg_picker != picker) return;
+    g_cfg_picker = nil; [picker release];
+}
+static void cfg_picker_dismiss(void) {
+    UIAlertController *picker = g_cfg_picker;
+    if (!picker) return;
+    [picker dismissViewControllerAnimated:NO completion:nil];
+    cfg_picker_finished(picker);
+}
+
 static const char *const cfg_tab_names[5] = { "Display", "Performance", "Game", "Controls", "Help" };
 
 /* the frosted material every native card wears, one helper (the host keeps it, it never takes a touch) */
@@ -1183,20 +1198,31 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
     if (model->num) model->num(model->val);
 }
 - (void)choose:(UIButton *)button {
+    if (g_cfg_picker || g_win.rootViewController.presentedViewController || !overlay_native_settings_wanted()) return;
     CfgRow *row = model;
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:row->title message:row->detail preferredStyle:UIAlertControllerStyleActionSheet];
+    g_cfg_picker = [sheet retain];
+    __block UIAlertController *weakSheet = sheet; /* no ARC: do not create sheet -> action -> sheet ownership */
     for (NSUInteger i = 0; i < row->seg.count; i++) {
         const int index = (int)i;
         [sheet addAction:[UIAlertAction actionWithTitle:row->seg[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            (void)action; row->sel = index; if (row->pick) row->pick(index);
-            [button setTitle:row->seg[index] forState:UIControlStateNormal];
+            (void)action;
+            if (g_cfg_picker == weakSheet && overlay_native_settings_wanted() && [g_cfg_rows containsObject:row]) {
+                row->sel = index; if (row->pick) row->pick(index);
+                [button setTitle:row->seg[index] forState:UIControlStateNormal];
+            }
+            cfg_picker_finished(weakSheet);
         }]];
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        (void)action; cfg_picker_finished(weakSheet);
+    }]];
     sheet.popoverPresentationController.sourceView = button;
     sheet.popoverPresentationController.sourceRect = button.bounds;
     [g_win.rootViewController presentViewController:sheet animated:YES completion:nil];
+    sheet.presentationController.delegate = (id<UIAdaptivePresentationControllerDelegate>)g_cfg_center;
 }
+
 - (void)configure:(CfgRow *)row {
     [control removeFromSuperview]; control = nil;
     [row retain]; [model release]; model = row;
@@ -1261,11 +1287,13 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
 }
 @end
 
-@interface CfgCenter : NSObject <UITableViewDataSource, UITableViewDelegate>
+@interface CfgCenter : NSObject <UITableViewDataSource, UITableViewDelegate, UIAdaptivePresentationControllerDelegate>
 - (void)done;
 @end
-static CfgCenter *g_cfg_center;
 @implementation CfgCenter
+- (void)presentationControllerDidDismiss:(UIPresentationController *)presentation {
+    if (presentation.presentedViewController == g_cfg_picker) cfg_picker_finished(g_cfg_picker);
+}
 - (void)done { ios_ui_haptic(0); cfg_close(); }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
     (void)table; (void)section; return g_cfg_rows.count;
@@ -1287,6 +1315,7 @@ static CfgCenter *g_cfg_center;
 @end
 
 static void cfg_close(void) {
+	cfg_picker_dismiss();
 	if (!g_cfg_dim) return;
 	g_cfg_dim.hidden = YES; g_cfg_card.hidden = YES;
 	g_cfg_page = -1;
@@ -1303,6 +1332,7 @@ static void cfg_page_build(int tab) {
 	}
 }
 static void cfg_rebuild(void) {
+	cfg_picker_dismiss();
 	const int tab = g_cfg_page >= 0 && g_cfg_page < 5 ? g_cfg_page : 0;
 	g_cfg_last_page = tab;
 	cfg_page_build(tab);
@@ -1465,6 +1495,7 @@ static ChromeCenter *g_center;
     /* A controller or keyboard can open/close the same settings state. Special game cards remain ImGui. */
     const BOOL wantsSettings = overlay_native_settings_wanted();
     if (wantsSettings && (!g_cfg_card || g_cfg_card.hidden)) ios_ui_settings_open(overlay_native_settings_page());
+    if (!wantsSettings) cfg_picker_dismiss();
     if (!wantsSettings && g_cfg_card && !g_cfg_card.hidden) {
         g_cfg_card.hidden = YES; g_cfg_dim.hidden = YES; g_cfg_page = -1;
     }
@@ -1548,35 +1579,37 @@ void ios_ui_chrome_toast(const char *title, const char *body, double seconds) {
 /* ---- install / placement ------------------------------------------------------------------ */
 /* Called before each present on the UI thread, including while menus are open. SDL's logical
  * size can remain unchanged while its Metal UIView/drawable returns in portrait after resume. */
-int ios_ui_chrome_sync_window(int *width, int *height) {
+int ios_ui_chrome_sync_window(int logical_w, int logical_h, int text_input, int *width, int *height) {
     if (!g_win || ![NSThread isMainThread]) return 0;
-    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return 0;
+    UIViewController *controller = g_win.rootViewController;
+    UIView *game = controller.view;
+    if (!game || !game.superview || ![game.layer isKindOfClass:[CAMetalLayer class]]) return 0;
     const CGRect bounds = g_win.bounds;
-    if (bounds.size.width <= 0 || bounds.size.height <= 0) return 0;
-    UIView *game = g_win.rootViewController.view;
-    if (!game || !game.superview || g_win.rootViewController.transitionCoordinator) return 0;
-    /* All supported orientations are landscape. Wait for UIKit to finish its window transition. */
-    if (bounds.size.height > bounds.size.width) return 0;
     const CGRect frame = [game.superview convertRect:bounds fromView:g_win];
-    BOOL repaired = NO;
-    if (!CGRectEqualToRect(game.frame, frame)) {
-        game.frame = frame; [game setNeedsLayout]; repaired = YES;
+    const CGRect actual = game.frame;
+    CAMetalLayer *metal = (CAMetalLayer *)game.layer;
+    const BOOL blocked = text_input || controller.transitionCoordinator || controller.presentedViewController ||
+        !CGAffineTransformIsIdentity(game.transform) || [UIApplication sharedApplication].applicationState != UIApplicationStateActive;
+    const IosViewportPlan plan = ios_viewport_plan(
+        (IosViewRect){frame.origin.x, frame.origin.y, frame.size.width, frame.size.height},
+        (IosViewRect){actual.origin.x, actual.origin.y, actual.size.width, actual.size.height},
+        metal.drawableSize.width, metal.drawableSize.height, g_win.screen.nativeScale,
+        logical_w, logical_h, blocked);
+    if (!plan.allowed) return 0;
+    if (plan.frame) game.frame = frame;
+    if (plan.layout) {
+        /* UIKit's own viewDidLayoutSubviews sends SDL its current size. SDL_SetWindowSize
+         * cannot repair the logical cache: UIKit_SetWindowSize is intentionally empty on iOS. */
+        [game setNeedsLayout]; [game layoutIfNeeded];
     }
-    [game layoutIfNeeded];
-    if ([game.layer isKindOfClass:[CAMetalLayer class]]) {
-        CAMetalLayer *metal = (CAMetalLayer *)game.layer;
-        const CGFloat scale = g_win.screen.nativeScale;
-        const CGSize drawable = CGSizeMake(round(game.bounds.size.width * scale), round(game.bounds.size.height * scale));
-        if (!CGSizeEqualToSize(metal.drawableSize, drawable)) {
-            metal.drawableSize = drawable; repaired = YES;
-        }
-    }
+    const CGSize drawable = CGSizeMake(plan.drawable_w, plan.drawable_h);
+    if (!CGSizeEqualToSize(metal.drawableSize, drawable)) metal.drawableSize = drawable;
     *width = (int)round(bounds.size.width); *height = (int)round(bounds.size.height);
     if (g_host) {
         g_host.frame = bounds;
-        if (!g_win.rootViewController.presentedViewController && g_win.subviews.lastObject != g_host) [g_win bringSubviewToFront:g_host];
+        if (g_win.subviews.lastObject != g_host) [g_win bringSubviewToFront:g_host];
     }
-    if (repaired) chrome_log("    chrome: repaired game view to %.0fx%.0f points, %.1fx drawable", bounds.size.width, bounds.size.height, g_win.screen.nativeScale);
+    if (plan.frame || plan.drawable || plan.layout) chrome_log("    chrome: reconciled game surface %.0fx%.0f points, SDL was %dx%d, drawable %.0fx%.0f", bounds.size.width, bounds.size.height, logical_w, logical_h, plan.drawable_w, plan.drawable_h);
     return 1;
 }
 
@@ -1675,7 +1708,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test34 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test35 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill

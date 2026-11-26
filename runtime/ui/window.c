@@ -53,7 +53,7 @@ static void safe_insets(float *t, float *b, float *l, float *r) { ios_safe_inset
 /* the phone's native chrome (runtime/platform/ios_ui_chrome.m, UIKit's own eye, top pull and toasts;
  * RECOMP_NATIVE_CHROME=0 there keeps the ImGui-built ones instead of installing any of it) */
 extern void ios_ui_chrome_install(void *native_window);
-extern int ios_ui_chrome_sync_window(int *width, int *height);
+extern int ios_ui_chrome_sync_window(int logical_w, int logical_h, int text_input, int *width, int *height);
 extern int ios_ui_chrome_blocks_touch(void);
 extern void ios_ui_chrome_cancel_controls(void);
 extern void ios_ui_chrome_place(float x);
@@ -100,6 +100,7 @@ static void pad_sticks(int only) {   /* (only: the stick whose axis moved, 0 lef
 	}
 }
 static int active;
+static int input_focused = 1; /* atomic: a background window cannot contribute held input */
 static int self_paced; static uint64_t last_paced_us;   /* a present mode that doesn't wait for vsync: the present loop paces itself */
 static SDL_GPUPresentMode base_pm = SDL_GPU_PRESENTMODE_VSYNC;   /* the present mode chosen at start (frame generation asks for vsync while it is on) */
 static volatile int touch_down, touch_x, touch_y;   /* the mouse as the front touch panel (1920x1088) */
@@ -285,6 +286,7 @@ static int mouse_script(float *ix, float *iy) {
 }
 int window_mouse_delta(float *dx, float *dy) {
 	int x = __atomic_exchange_n(&mouse_dx_q8, 0, __ATOMIC_RELAXED), y = __atomic_exchange_n(&mouse_dy_q8, 0, __ATOMIC_RELAXED);
+	if (!__atomic_load_n(&input_focused, __ATOMIC_ACQUIRE)) { *dx = *dy = 0; return 0; }
 	raw_taken_us = now_us();
 	float ix = 0, iy = 0; int scripted = mouse_script(&ix, &iy);
 	if (!rel_on && !scripted) { *dx = *dy = 0; return 0; }
@@ -472,6 +474,7 @@ static void twist_place(float a) {  /* the left button's two fingers, 300 points
 static int last_touch_key[2];   /* the input behind each panel's latest contact (window_last_touch_key) */
 int window_last_touch_key(int port) { return last_touch_key[port & 1]; }
 int window_touch_contacts(int port, int *keys, int *xs, int *ys, int max) {
+	if (!__atomic_load_n(&input_focused, __ATOMIC_ACQUIRE)) return 0;
 	int n = 0;
 	#define ADD(k, x, y) do { if (n < max) { keys[n] = (k); xs[n] = (x); ys[n] = (y); n++; } } while (0)
 	if (port == 0 && touch_down) { ADD(1, touch_x, touch_y); if (hold_due(&hold_mouse[0])) touch_down = 0; }
@@ -1267,7 +1270,11 @@ static void touchpad_read(uint32_t *b, uint8_t s[4]) {
     if (p[2] != 128 || p[3] != 128) { s[2] = p[2]; s[3] = p[3]; }
 }
 
-void window_input(uint32_t *b, uint8_t s[4]) {	*b = buttons & ~(L3 | R3 | PAD_L2 | PAD_R2);
+void window_input(uint32_t *b, uint8_t s[4]) {
+    if (!__atomic_load_n(&input_focused, __ATOMIC_ACQUIRE)) {
+        *b = 0; for (int i = 0; i < 4; i++) s[i] = 128; return;
+    }
+	*b = buttons & ~(L3 | R3 | PAD_L2 | PAD_R2);
 	for (int i = 0; i < 4; i++) s[i] = sticks[i];
 	/* Layout is UI-thread only; the game reads the published input word. */
 	touchpad_read(b, s);   /* the on-screen pad's buttons and sticks, over the keyboard's and the pad's */
@@ -1283,6 +1290,7 @@ void window_input(uint32_t *b, uint8_t s[4]) {	*b = buttons & ~(L3 | R3 | PAD_L2
 void window_input_pad2(uint32_t *b, uint8_t s[4]) {
 	const uint32_t v = buttons;
 	window_input(b, s);
+	if (!__atomic_load_n(&input_focused, __ATOMIC_ACQUIRE)) return;
 	*b = (*b & ~(LTRIG | RTRIG)) | (v & LTRIG ? L1 : 0) | (v & RTRIG ? R1 : 0) | (v & PAD_L2 ? LTRIG : 0) | (v & PAD_R2 ? RTRIG : 0) | (v & (L3 | R3));
 }
 
@@ -1357,6 +1365,32 @@ static void pad_resync(SDL_Gamepad *pad) {   /* L and R as held now (the menu cl
 		if (pad) pad_main(pad, k, pad_input_down(pad, pbind.in[k ? PBA_R : PBA_L]));
 	}
 }
+
+/* Release every input source together on focus loss or entry to a modal menu. */
+static void window_clear_input(void) {
+    touchpad_cancel_all();
+    buttons = 0; touch_down = 0; flick_down = 0;
+    gesture_drag = 0; twist_drag = 0; twist_pad = 0;
+    gamepad_touch_release();
+    for (int i = 0; i < 4; i++) { sticks[i] = 128; pad_raw[i] = 0; }
+    for (int i = 0; i < KB_N; i++) kb_binds[i].held = 0;
+    kbm_lmb = kbm_rmb = 0; look_dx_q8 = look_dy_q8 = 0;
+    __atomic_store_n(&mouse_dx_q8, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&mouse_dy_q8, 0, __ATOMIC_RELAXED);
+#if IOS_UI_CHROME
+    ios_ui_chrome_cancel_controls();
+#endif
+}
+
+#if IOS_UI_CHROME
+static void ios_window_geometry_tick(void) {
+    if (!win) return;
+    int logical_w = 0, logical_h = 0, actual_w = 0, actual_h = 0;
+    SDL_GetWindowSize(win, &logical_w, &logical_h);
+    if (ios_ui_chrome_sync_window(logical_w, logical_h, SDL_TextInputActive(win) || SDL_ScreenKeyboardShown(win), &actual_w, &actual_h))
+        touchpad_layout_for((float)actual_w, (float)actual_h);
+}
+#endif
 
 typedef struct { void *(*fn)(void *); void *arg; } Game;
 static void *game_main(void *p) { Game *g = p; g->fn(g->arg); return 0; }
@@ -1464,21 +1498,19 @@ void window_run(void *(*fn)(void *), void *arg) {
 	for (;;) {
         SDL_Event e;
 #if IOS_UI_CHROME
-        int ui_w = 0, ui_h = 0;
-        if (win && ios_ui_chrome_sync_window(&ui_w, &ui_h)) {
-            int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h);
-            if (w != ui_w || h != ui_h) SDL_SetWindowSize(win, ui_w, ui_h);
-        }
+        ios_window_geometry_tick();
 #endif
         if (win) { int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h); touchpad_layout_for(w, h); }
         finger_script();
 		while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST || e.type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
-                touchpad_cancel_all(); buttons = 0; touch_down = 0; gamepad_touch_release();
-#if IOS_UI_CHROME
-                ios_ui_chrome_cancel_controls();
-#endif
-                for (int i = 0; i < KB_N; i++) kb_binds[i].held = 0;
+                __atomic_store_n(&input_focused, 0, __ATOMIC_RELEASE);
+                window_clear_input(); pad_back = pad_start = pad_combo_latch = 0;
+            }
+            if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED || e.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+                for (int i = 0; i < 4; i++) pad_raw[i] = pad ? SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)i) : 0;
+                pad_sticks(-1); pad_resync(pad);
+                __atomic_store_n(&input_focused, 1, __ATOMIC_RELEASE);
             }
 #if IOS_UI_CHROME
             if (ios_ui_chrome_blocks_touch() && (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION ||
@@ -1578,7 +1610,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 				pad_gyro = g && a;
 				fprintf(stderr, "gamepad: %s%s%s\n", SDL_GetGamepadName(pad) ? SDL_GetGamepadName(pad) : "?", SDL_GetNumGamepadTouchpads(pad) > 0 ? ", touchpad" : "", pad_gyro ? ", gyro" : "");
 			}
-			if (e.type == SDL_EVENT_GAMEPAD_REMOVED && pad && SDL_GetGamepadID(pad) == e.gdevice.which) { SDL_CloseGamepad(pad); pad = 0; __atomic_store_n(&pad_connected, 0, __ATOMIC_RELAXED); pad_gyro = 0; motion_lost(); gamepad_touch_release(); buttons = 0; for (int i = 0; i < 4; i++) { sticks[i] = 128; pad_raw[i] = 0; } }
+			if (e.type == SDL_EVENT_GAMEPAD_REMOVED && pad && SDL_GetGamepadID(pad) == e.gdevice.which) { SDL_CloseGamepad(pad); pad = 0; pad_back = pad_start = pad_combo_latch = 0; __atomic_store_n(&pad_connected, 0, __ATOMIC_RELAXED); pad_gyro = 0; motion_lost(); gamepad_touch_release(); buttons = 0; for (int i = 0; i < 4; i++) { sticks[i] = 128; pad_raw[i] = 0; } }
 			if (e.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE) {
 				if (e.gsensor.sensor == SDL_SENSOR_ACCEL) motion_feed_accel(e.gsensor.data, e.gsensor.sensor_timestamp);
 				else if (e.gsensor.sensor == SDL_SENSOR_GYRO) motion_feed_gyro(e.gsensor.data, e.gsensor.sensor_timestamp);
@@ -1661,11 +1693,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 			if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e.gaxis.axis < 4) { pad_raw[e.gaxis.axis] = e.gaxis.value; pad_sticks(e.gaxis.axis / 2); }
 		}
 #if IOS_UI_CHROME
-        if (win && ios_ui_chrome_sync_window(&ui_w, &ui_h)) {
-            int w = 0, h = 0; SDL_GetWindowSize(win, &w, &h);
-            if (w != ui_w || h != ui_h) SDL_SetWindowSize(win, ui_w, ui_h);
-            touchpad_layout_for((float)ui_w, (float)ui_h);
-        }
+        ios_window_geometry_tick();
 #endif
 		tp_zone_tick();
 		{	/* keyboard + mouse, once a loop: which scheme, the capture, WASD as the left stick, the look's stand-in */
@@ -1883,7 +1911,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 		{	/* the menu just closed (any way: F10, Escape, a pad combo, its Resume button): the sticks moved
 			 * while it had the events -- a stick let go with the menu up would otherwise stay deflected */
 			static int was_open; int open = overlay_is_open() || overlay_dialog_active();   /* (the save dialog too) */
-			if (open && !was_open) { touchpad_cancel_all(); buttons = 0; touch_down = 0; gamepad_touch_release(); for (int i = 0; i < KB_N; i++) kb_binds[i].held = 0; }   /* let go of what was held as it opened */
+			if (open && !was_open) window_clear_input();   /* let go of what was held as it opened */
 			if (was_open && !open) {
 				kb_reload();   /* (the Controls page may have rebound keys) */
 				for (int i = 0; i < 4; i++) pad_raw[i] = pad ? SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)i) : 0;
