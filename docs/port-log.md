@@ -515,3 +515,32 @@ Three from the phone's report, all clean:
   holders swept on each rebuild, and the sliders' blocks use
   __block pointers so they never retain the slider that targets
   them (no ARC here; what leaks at all, leaks nothing).
+
+### Step 39 — the leftovers, native (UIKit)
+
+- The last four ImGui surfaces on a phone are the phone's own:
+  - the stats OSD (Off/FPS/Full) -- a monospaced label under the
+    eye's corner, re-stringed from metrics_osd_lines by the tick;
+  - the pause card -- PAUSED with the Resume hint, reading the same
+    overlay_game_paused the banner did;
+  - the intro strip -- the first-launch lesson at the bottom
+    centre, taps falling through it, its twelve-second and
+    first-touch rules now in the chrome's own tick
+    (window_touch_contacts watched there, as the ImGui card had);
+  - the settings center: the full menu's five pages (Display,
+    Performance, Game, Controls, Help) as UIKit rows in a dimmed
+    card -- switches, segmented controls, sliders, the game's own
+    controls list, live FPS -- every one driving the same handles
+    the ImGui pages drove (overlay.cpp's new extern "C" set:
+    opt/capable/language/controls/gyro probes; no new state).
+- Opening it goes through the same overlay_open/overlay_close as
+  the ImGui menu (pause, input routing, audio, the pad's stand-down
+  bits all as they were): the strip's "All settings..." and
+  "Controls reference..." rows and the ImGui twins' own ways in all
+  land on the same state machine.
+- While the native chrome is installed: build_ui, the pause
+  banner, the intro card and the OSD panel build never (overlay.cpp
+  gates them); RECOMP_NATIVE_CHROME=0 restores all of it.
+- Still ImGui on a phone: the save-data dialogs, the message/IME
+  dialogs, and the rare prep/layout/quit cards -- game- or
+  host-driven popups, the next round's work if wanted.

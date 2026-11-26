@@ -716,6 +716,7 @@ static int g_select_tab = -1;   /* the bar asked for this page (open_page): sele
 static int g_section = TAB_DISPLAY;
 static void open_page(int tab) { g_select_tab = tab; overlay_open(); }
 static void build_ui(void) {
+	if (phone_ui() && ios_ui_chrome_active()) return;   /* the phone's full menu is UIKit's own (ios_ui_chrome.m's settings center): build never */
 	ImGuiIO &io = ImGui::GetIO();
 	const float em = ImGui::GetFontSize();
 	if (g_select_tab >= 0) { g_section = g_select_tab; g_select_tab = -1; }
@@ -1045,6 +1046,61 @@ extern "C" {
 	int overlay_stats_level(void) { return metrics_osd_level(); }
 	void overlay_set_stats(int level) { set_osd(level); }
 	void overlay_show_controls_page(void) { open_page(TAB_CONTROLS); }
+	/* Step 39: the native settings center's own handles -- the phone's full menu, the same state */
+	int overlay_intro_up(void) { return g_intro ? 1 : 0; }
+	void overlay_intro_dismiss(void) { if (g_intro) intro_end(); }
+	int overlay_osd_lines(char out[][40], int max) { return g_ctx && g_has_window ? metrics_osd_lines(out, max) : 0; }
+	double overlay_fps(void) { return metrics_fps(); }
+	int overlay_game_has(const char *k) { return game_option(k) ? 1 : 0; }
+	int overlay_capable(const char *k) {   /* what this build's GPU paths offer, the Display page's rows by name */
+		if (!strcmp(k, "widescreen")) return window_aspect_supported() ? 1 : 0;
+		if (!strcmp(k, "hud")) return gfx_gpu_hud_supported() ? 1 : 0;
+		if (!strcmp(k, "ssao")) return gfx_gpu_ssao_supported() ? 1 : 0;
+		if (!strcmp(k, "fsr")) return gfx_gpu_fsr_supported() ? 1 : 0;
+		if (!strcmp(k, "fullres")) return gfx_gpu_target_scale_supported() ? 1 : 0;
+		return 0;
+	}
+	float overlay_opt_get(const char *k) {   /* the game-page sliders (P: this file's own prefs, overlay.h's saved state) */
+		prefs_load();
+		if (!strcmp(k, "fov")) return P.fov;
+		if (!strcmp(k, "view")) return P.view;
+		if (!strcmp(k, "scen")) return P.scen;
+		if (!strcmp(k, "chr")) return P.chr;
+		if (!strcmp(k, "volume")) return P.vol;
+		if (!strcmp(k, "gyro_sens")) return P.gyro_sens;
+		return 0.0f;
+	}
+	void overlay_opt_set(const char *k, float v) {
+		prefs_load();
+		if (!strcmp(k, "fov")) set_fov(v);
+		else if (!strcmp(k, "view")) set_view(v);
+		else if (!strcmp(k, "scen")) set_scen(v);
+		else if (!strcmp(k, "chr")) set_chr(v);
+		else if (!strcmp(k, "volume")) set_volume(v);
+		else if (!strcmp(k, "gyro_sens")) set_gyro_sens(v);
+	}
+	static int g_lang_keys[16], g_lang_n = -1;   /* the allowed languages, indexed once (page_game's own list) */
+	static void lang_init(void) {
+		if (g_lang_n >= 0) return;
+		g_lang_n = 1; g_lang_keys[0] = -1;
+		for (int i = 0; i < game_language_count && g_lang_n < 16; i++) if (game_language_allowed(game_languages[i].key)) g_lang_keys[g_lang_n++] = i;
+	}
+	int overlay_lang_count(void) { lang_init(); return g_lang_n; }
+	const char *overlay_lang_label(int i) { lang_init(); return i > 0 && i < g_lang_n && g_lang_keys[i] >= 0 ? game_languages[g_lang_keys[i]].label : "Automatic"; }
+	int overlay_lang_get(void) {
+		lang_init(); char cur[32]; settings_str("game_language", "auto", cur, sizeof cur);
+		for (int k = 1; k < g_lang_n; k++) if (!strcmp(cur, game_languages[g_lang_keys[k]].key)) return k;
+		return 0;
+	}
+	void overlay_lang_set(int i) { lang_init(); if (i < 0 || i >= g_lang_n) return; settings_set_str("game_language", i ? game_languages[g_lang_keys[i]].key : "auto"); settings_save(); }
+	int overlay_controls_count(void) { return window_controls_count(); }
+	void overlay_controls_row(int i, const char **action, const char **pad) { const char *key; window_controls_row(i, action, &key, pad); }
+	int overlay_gyro_present(void) { return window_gyro_present() ? 1 : 0; }
+	int overlay_gyro_get(void) { prefs_load(); return P.gyro != 0; }
+	void overlay_gyro_set(int on) { set_gyro(on); }
+	int overlay_gyro_pose_get(void) { prefs_load(); return P.gyro_flat; }
+	void overlay_gyro_pose_set(int flat) { set_gyro_pose(flat); }
+	void overlay_gyro_recentre(void) { motion_recenter(); }
 }
 /* the bar: a window the width of the display, exactly one menu-bar high, parked above the top edge by
  * (1 - vis) of its height -- the slide. Its menus are ImGui popups below it. */
@@ -1251,6 +1307,7 @@ static void build_toasts(float w, float hgt, double t) {
 }
 /* Game > Pause (not the menu): the picture stays, with this over it */
 static void build_pause_banner(float w, float hgt) {
+	if (phone_ui() && ios_ui_chrome_active()) return;   /* the native pause card (ios_ui_chrome.m) */
 	ImFont *font = ImGui::GetFont(); const float fs = ImGui::GetFontSize() * 2.0f;
 	static const char l1[] = "PAUSED", l2p[] = "Pull down from the top of the screen, then Game > Resume",
 	                   l2d[] = "Game > Resume in the menu bar (mouse to the top), or F10";
@@ -1270,7 +1327,7 @@ static char g_osd[7][40]; static int g_nosd;   /* the overlay's lines this frame
 int overlay_draws_hud(void) { return g_ctx && g_has_window; }
 static void build_marks(void) {
 	ImDrawList *dl = g_intro ? ImGui::GetForegroundDrawList() : ImGui::GetBackgroundDrawList();   /* over the game's frame (LOAD), under the bar and its menus; over the touch card */
-	if (g_nosd) {   /* the overlay: a translucent dark panel at the top-left corner with the lines, as the bitmap version drew it (metrics.c); below the bar while that's down */
+	if (g_nosd && !(phone_ui() && ios_ui_chrome_active())) {   /* the overlay: a translucent dark panel at the top-left corner with the lines, as the bitmap version drew it (metrics.c); below the bar while that's down (the native chrome draws its own) */
 		ImFont *font = ImGui::GetFont(); float fs = ImGui::GetFontSize() * 2.0f;   /* the embedded bitmap font at an integer multiple: crisp */
 		const float x = 8, y = 8 + g_bar_h * g_bar_vis, pad = 6, lh = fs + 2; float wmax = 0;
 		for (int i = 0; i < g_nosd; i++) { ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, g_osd[i]); if (sz.x > wmax) wmax = sz.x; }
@@ -1940,6 +1997,7 @@ static void build_intro_hint(void) {
 	ImGui::PopStyleVar(2);
 }
 static void build_intro(void) {
+	if (phone_ui() && ios_ui_chrome_active()) return;   /* the native strip (ios_ui_chrome.m) owns it: its own tick holds the 12-second and first-touch rules */
 	const double t = g_intro_at >= 0 ? g_intro_at : ImGui::GetTime();
 	prompts_load();
 	if (g_has_window && (g_intro_dev < 0 || g_intro_done < 0)) g_intro_dev = phone_ui() ? DEV_TOUCH : (window_kbm_active() ? DEV_KBM : DEV_PAD);   /* (the device last used, as play sees it; headless, the one asked for) */
