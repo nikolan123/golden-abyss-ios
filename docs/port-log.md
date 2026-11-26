@@ -241,3 +241,36 @@ nothing at all -- the ImGui eye, pull and toasts carry the phone as
 they did. The chip's pad-off bug went with it: the eye's x is its own
 number now (touchpad_eye_x), not a pill's left edge (a pad-off layout
 has no pill, and the chip sat at -54, off the glass).
+
+### Step 27 — the pad itself: UIKit's pixels, touches, and the taptic engine
+
+The controls stop being an ImGui card traced over the game. Two halves,
+one layout (tp_layout's TpVisual, the same numbers window.c hit-tests
+with -- neither picture nor touch can drift from it):
+
+- **PadLayer** (ios_ui_chrome.m) is the pad's whole picture: a
+  full-screen canvas drawing the very shapes and colours pad_draw drew
+  -- the fills, rings, the Vita's glyphs as Core Graphics paths, the
+  same weights -- dirty-rect synced per frame by the display link (a
+  button's box while it can change, a wider box around a live stick so
+  the knob can slide). While the native chrome is on, pad_draw stands
+  down entirely; RECOMP_NATIVE_CHROME=0 brings the ImGui pad back.
+- **PadBtn** is each control's touch area: invisible, pointInside the
+  exact test tp_hit makes (a pill's box, a 1.18-radius circle), and
+  stepping aside wherever overlay_owns_point says ImGui owns the
+  point -- a bar menu over the shoulders or a dialog behaves exactly
+  as before, the finger falling through to SDL. A touch presses
+  through window.c's own native path (touchpad_native_press: tp_bits
+  and the down flag, tp_release letting go), so the game's input and
+  the pressed visuals are identical to the finger path's.
+- **Haptics everywhere**: a button taps light, the shoulders medium, a
+  thumb's hold becoming a stick taps soft (fired from the very line
+  tp_zone_hold spawns it at), the eye and a pull from the top edge tap
+  light. UIImpactFeedbackGenerator, prepared as first asked.
+- While overlay_pad_hidden (our menu, the intro, the bar, a popup) is
+  up, the native picture stands down -- it draws over everything
+  UIKit-side, so it must mind what the ImGui pad never had to.
+
+The dynamic sticks' logic -- pockets, tap-pass-through, hold and drag
+thresholds -- is untouched in window.c; only what the pad *looks like*
+and *answers with at the glass* went native.

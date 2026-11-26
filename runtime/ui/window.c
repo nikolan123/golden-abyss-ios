@@ -54,6 +54,8 @@ static void safe_insets(float *t, float *b, float *l, float *r) { ios_safe_inset
  * RECOMP_NATIVE_CHROME=0 there keeps the ImGui-built ones instead of installing any of it) */
 extern void ios_ui_chrome_install(void);
 extern void ios_ui_chrome_place(float x);
+extern void ios_ui_pad_layout(void);    /* the native buttons over the same layout: positioned from tp_layout's own numbers */
+extern void ios_ui_haptic(int kind);    /* the taptic engine: 0 light, 1 medium (the shoulders), 2 soft (a stick spawning) */
 #define IOS_UI_CHROME 1
 #else
 static void safe_insets(float *t, float *b, float *l, float *r) { *t = *b = *l = *r = 0.0f; }
@@ -1042,6 +1044,7 @@ static void tp_layout(float w, float h) {
 		tp_eye_x = ml;
 #if IOS_UI_CHROME
 		ios_ui_chrome_place(ml);
+		ios_ui_pad_layout();   /* the native buttons (ios_ui_chrome.m) read this same tv: one layout, two pictures */
 #endif
 	}
 	if (!tv.on) return;
@@ -1155,6 +1158,9 @@ static int tp_zone_hold(const SDL_Event *e) {
 		tp_apply_stick(2, x, y, bx, by, tv.sr_r, &tp_stick[2], &tp_stick[3]);
 	}
 	if (pad_dbg()) fprintf(stderr, "    finger %u: it held or dragged in pocket %d -- its stick spawned at (%.0f, %.0f), the game's brief tap ended\n", (unsigned)e->tfinger.fingerID, zone, tpf[slot].bx, tpf[slot].by);
+#if IOS_UI_CHROME
+	ios_ui_haptic(2);   /* the thumb's answer: what landed became a stick (the taptic engine knows before the eye does) */
+#endif
 	zwait[k].id = 0; zwait[k].zone = 0;
 	return 1;
 }
@@ -1192,6 +1198,20 @@ static int pad_dbg(void) {
 	static int v = -1;
 	if (v < 0) { const char *e = getenv("RECOMP_PAD_DEBUG"); v = e && *e && *e != '0'; }
 	return v;
+}
+
+/* the native chrome's own buttons (ios_ui_chrome.m: UIKit touch areas over the same layout): the
+ * exact state the finger path sets -- tp_bits for the game's input, the down flag the picture reads
+ * (whichever of the two draws it). tp_release lets go, clearing a press tp_clear already took. */
+void touchpad_native_press(int which) {
+	int i = which - 10;
+	if (!tv.on || overlay_is_open() || i < 0 || i >= tv.nb) return;
+	tp_bits |= tv.b[i].bit;
+	tv.b[i].down = 1;
+	if (pad_dbg()) fprintf(stderr, "    native touch: button %d down\n", i);
+}
+void touchpad_native_release(int which) {
+	tp_release(which);
 }
 static int touchpad_event(const SDL_Event *e) {
 	if (!tv.on || !tv.w) return 0;

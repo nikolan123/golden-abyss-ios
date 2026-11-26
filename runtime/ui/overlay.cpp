@@ -885,6 +885,16 @@ extern "C" int overlay_owns_point(float x, float y) {
 	}
 	return 0;
 }
+/* for the native chrome's pad (ios_ui_chrome.m, whose canvas draws over everything UIKit-side):
+ * is something of ours up over the picture -- the open menu, the intro card, the bar down, one of
+ * its menus, a dialog? While any of that is up the native pad stands its pixels down, the same
+ * standing-down the ImGui pad never had to mind (it was drawn into the frame *under* those). */
+extern "C" int overlay_pad_hidden(void) {
+	if (!g_ctx || !g_has_window) return 0;
+	ImGui::SetCurrentContext(g_ctx);
+	ImGuiContext &ctx = *ImGui::GetCurrentContext();
+	return (g_open || g_intro || g_bar_vis > 0.01f || !ctx.OpenPopupStack.empty()) ? 1 : 0;
+}
 
 static void menu_game(void) {
 	if (phone_ui()) {   /* a phone: the four things anyone reaches for; no keyboard exists, so no key hints */
@@ -1496,6 +1506,7 @@ static void pad_draw(void) {
 	touchpad_layout_for(io.DisplaySize.x, io.DisplaySize.y);   /* (the dump draws before the game's first pad read) */
 	const TpVisual *tv = touchpad_visuals();
 	if (!tv->on) return;
+	if (ios_ui_chrome_active()) return;   /* UIKit's layer draws the pad now (ios_ui_chrome.m): the same layout, the same look, its own pixels */
 	ImDrawList *dl = ImGui::GetBackgroundDrawList();
 	const float a = (tv->opacity < 0 ? 0 : tv->opacity > 100 ? 100 : tv->opacity) / 100.0f;
 	const ImU32 fill = IM_COL32(12, 14, 18, (int)(255 * a * 0.55f));
