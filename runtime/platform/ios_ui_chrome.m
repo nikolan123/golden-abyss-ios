@@ -192,6 +192,7 @@ static void eye_look(void) {
 	int idx;              /* TpButton's index: window.c speaks `which - 10` */
 	int pill;
 	int down;             /* this touch has the button */
+	uint64_t contact;
 }
 @end
 
@@ -211,17 +212,43 @@ static void eye_look(void) {
 	const float cxr = self.bounds.size.width * 0.5f, cyr = self.bounds.size.height * 0.5f;
 	return hypotf(p.x - cxr, p.y - cyr) <= cxr;   /* the 1.18-radius circle, in the box the frame is */
 }
-- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)ev { (void)ev;
-	const CGPoint p = [[t anyObject] locationInView:nil];
-	if (!down) {
-		down = 1;
-		if (!overlay_is_open()) { touchpad_native_press(10 + idx); ios_ui_haptic(pill ? 1 : 0); }
-		chrome_log("    chrome: btn %d (%s) down at (%.0f, %.0f), pressed %d", idx, pill ? "pill" : "round", p.x, p.y, !overlay_is_open());
-	} }
-- (void)touchesEnded:(NSSet<UITouch *> *)t withEvent:(UIEvent *)ev { (void)t; (void)ev;
-	if (down) { chrome_log("    chrome: btn %d up", idx); down = 0; touchpad_native_release(10 + idx); } }
-- (void)touchesCancelled:(NSSet<UITouch *> *)t withEvent:(UIEvent *)ev { (void)t; (void)ev;
-	if (down) { chrome_log("    chrome: btn %d cancelled", idx); down = 0; touchpad_native_release(10 + idx); } }
+- (UITouch *)trackedTouch:(NSSet<UITouch *> *)touches {
+	for (UITouch *touch in touches) if ((uint64_t)(uintptr_t)touch == contact) return touch;
+	return nil;
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	(void)event;
+	if (down) return;
+	UITouch *touch = [touches anyObject];
+	if (!touch) return;
+	const CGPoint point = [touch locationInView:g_host];
+	contact = (uint64_t)(uintptr_t)touch;
+	down = touchpad_native_begin(10 + idx, contact, point.x, point.y);
+	if (down) ios_ui_haptic(pill ? 1 : 0); else contact = 0;
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	UITouch *touch = [self trackedTouch:touches];
+	if (!down || !touch) return;
+	NSArray<UITouch *> *samples = [event coalescedTouchesForTouch:touch];
+	for (UITouch *sample in samples.count ? samples : @[touch]) {
+		const CGPoint point = [sample locationInView:g_host];
+		touchpad_native_move(10 + idx, contact, point.x, point.y);
+	}
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	(void)event;
+	UITouch *touch = [self trackedTouch:touches];
+	if (!down || !touch) return;
+	const CGPoint point = [touch locationInView:g_host];
+	touchpad_native_end(10 + idx, contact, point.x, point.y, 0);
+	down = 0; contact = 0;
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	(void)event;
+	if (!down || ![self trackedTouch:touches]) return;
+	touchpad_native_end(10 + idx, contact, 0, 0, 1);
+	down = 0; contact = 0;
+}
 @end
 
 static UIColor *rgba(int r, int g, int b, float a) { return [UIColor colorWithRed:r / 255.0f green:g / 255.0f blue:b / 255.0f alpha:a]; }
@@ -389,7 +416,11 @@ static PadBtn   *g_pad_hits[8];       /* its touch areas, positioned from the sa
 static UIImpactFeedbackGenerator *g_hap[3];   /* light / medium / soft, prepared as they're first asked */
 
 void ios_ui_chrome_cancel_controls(void) {
-    for (int i = 0; i < 8; i++) if (g_pad_hits[i]) g_pad_hits[i]->down = 0;
+    for (int i = 0; i < 8; i++) if (g_pad_hits[i]) {
+        PadBtn *view = g_pad_hits[i];
+        if (view->down) touchpad_native_end(10 + i, view->contact, 0, 0, 1);
+        view->down = 0; view->contact = 0;
+    }
 }
 
 /* the taptic engine's answer: 0 light (a button, the eye, a pull), 1 medium (the shoulders), 2 soft
@@ -852,6 +883,16 @@ static void cfg_page_controls(void) {
 			settings_set_float("touch_sens", v / 100.0); settings_save();
 		});
 	}
+	{
+		const char *supported = getenv("RECOMP_TOUCH_SHOOT");
+		if (supported && *supported && *supported != '0') {
+			CfgRow *r = cfg_switch("Two-thumb shooting", settings_int("touch_shoot", 1), ^(int enabled) {
+				settings_set_int("touch_shoot", enabled); settings_save();
+				touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
+			});
+			r->detail = @"Tap L to toggle aim, then hold and drag R to shoot and aim. Holding L keeps its normal behavior. Requires Touch look.";
+		}
+	}
 	cfg_slider("Pad size", 60, 160, (float)touchpad_scale(), 1, ^(double v) { touchpad_set_scale((int)(v + 0.5)); });
 	{
 		CfgRow *r = cfg_switch("Left-handed", touchpad_mirror(), ^(int to) { touchpad_set_mirror(to); });
@@ -1250,9 +1291,12 @@ void ios_ui_pad_layout(void) {
 			[v release];   /* the host owns it */
 			g_pad_hits[i] = v;
 		}
-		if (!tv->on || i >= tv->nb) { if (v->down) touchpad_native_release(10 + i); v.hidden = YES; v->down = 0; continue; }
+		if (!tv->on || i >= tv->nb) {
+			if (v->down) touchpad_native_end(10 + i, v->contact, 0, 0, 1);
+			v.hidden = YES; v->down = 0; v->contact = 0; continue;
+		}
 		const TpButton *b = &tv->b[i];
-		v->down = 0; /* a geometry change has released the old layout's fingers */
+		v->down = 0; v->contact = 0; /* a geometry change has released the old layout's fingers */
 		v->pill = b->pill;
 		if (b->pill) v.frame = CGRectMake(b->x - b->hw, b->y - b->hh, 2 * b->hw, 2 * b->hh);
 		else { const float e = b->r * 1.18f; v.frame = CGRectMake(b->x - e, b->y - e, 2 * e, 2 * e); }
@@ -1311,8 +1355,17 @@ int ios_ui_chrome_handle_event(const SDL_Event *event) {
     g_eye.hidden = hideChrome; g_menu_gear.hidden = overlay_is_open() || (reasons & 8);
     const BOOL hidePad = !touchpad_on() || reasons;
     for (int i = 0; i < 8; i++) if (g_pad_hits[i]) {
-        if (hidePad && g_pad_hits[i]->down) { g_pad_hits[i]->down = 0; touchpad_native_release(10 + i); }
+        if (hidePad && g_pad_hits[i]->down) {
+            touchpad_native_end(10 + i, g_pad_hits[i]->contact, 0, 0, 1);
+            g_pad_hits[i]->down = 0; g_pad_hits[i]->contact = 0;
+        }
         g_pad_hits[i].hidden = hidePad;
+    }
+    if (g_pad_hits[4]) {
+        const BOOL assist = touchpad_native_shoot_available(), aiming = touchpad_native_aim_latched();
+        g_pad_hits[4].accessibilityLabel = assist ? @"Left shoulder, tap to toggle aim" : @"Left shoulder";
+        g_pad_hits[4].accessibilityValue = assist ? (aiming ? @"On" : @"Off") : nil;
+        g_pad_hits[4].accessibilityTraits = UIAccessibilityTraitButton | (aiming ? UIAccessibilityTraitSelected : 0);
     }
     if (g_pad_layer) [g_pad_layer sync];
     /* A controller or keyboard can open/close the same UIKit settings state. */
@@ -1527,7 +1580,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test49 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test50 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill

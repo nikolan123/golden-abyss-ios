@@ -37,10 +37,10 @@ enum { SDL_EVENT_FINGER_DOWN=1, SDL_EVENT_FINGER_UP, SDL_EVENT_FINGER_MOTION, SD
 typedef struct { int type; struct { SDL_FingerID fingerID; float x, y; } tfinger; } SDL_Event;
 enum { SELECT=1, START=8, LTRIG=0x100, RTRIG=0x200, TRIANGLE=0x1000, CIRCLE=0x2000, CROSS=0x4000, SQUARE=0x8000,
        L1=0x400, R1=0x800, L3=2, R3=4, PAD_L2=0x10000, PAD_R2=0x20000 };
-static const char *keys[] = {"touchpad", "touchpad_scale", "touchpad_left", "touchpad_opacity", "touchpad_rstick", "touch_look"};
-static int values[] = {1,100,0,42,1,0};
+static const char *keys[] = {"touchpad", "touchpad_scale", "touchpad_left", "touchpad_opacity", "touchpad_rstick", "touch_look", "touch_shoot"};
+static int values[] = {1,100,0,42,1,0,1};
 static float touch_sens=-1;
-static int key_index(const char *key) { for (int i=0;i<6;i++) if (!strcmp(key,keys[i])) return i; return -1; }
+static int key_index(const char *key) { for (int i=0;i<7;i++) if (!strcmp(key,keys[i])) return i; return -1; }
 static double settings_float(const char *key,double fallback) { return !strcmp(key,"touch_sens") && touch_sens>=0 ? touch_sens : fallback; }
 static int settings_has(const char *key) { return key_index(key)>=0; }
 static int settings_int(const char *key,int fallback) { int i=key_index(key); return i<0?fallback:values[i]; }
@@ -373,7 +373,115 @@ static void game_menu_routing(void) {
     touchpad_native_release(10); unsetenv("RECOMP_TOUCH_GAMEPLAY_GATE");
     puts("PASS: main-menu swipes remain raw touches; eligible player updates enable gameplay controls; expiry releases sticks without clearing menu buttons");
 }
-int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); game_menu_routing(); return 0; }
+static void shoot_ready(void) {
+    touchpad_cancel_all(); menu=dialog=game_gesture=game_twist=lb_held=rb_held=0;
+    input_focused=1; values[5]=values[6]=1; touch_sens=1;
+    setenv("RECOMP_TOUCH_SHOOT","1",1); setenv("RECOMP_TOUCH_LOOK","1",1);
+    setenv("RECOMP_TOUCH_GAMEPLAY_GATE","1",1); clock_ns+=1000000000;
+    window_touch_gameplay_tick(); touchpad_set_on(1); touchpad_set_mirror(0); touchpad_layout_for(932,430);
+    assert(touchpad_native_shoot_available());
+}
+static void aim_tap(uint64_t id) {
+    window_touch_gameplay_tick();
+    assert(touchpad_native_begin(14,id,tv.b[4].x,tv.b[4].y));
+    clock_ns+=50000000; window_touch_gameplay_tick();
+    touchpad_native_end(14,id,tv.b[4].x,tv.b[4].y,0);
+}
+static void native_shooting(void) {
+    float dx,dy; uint32_t b; uint8_t sticks[4];
+    shoot_ready(); aim_tap(1001); assert(tp_aim_latched && tv.b[4].down);
+    assert(touchpad_native_begin(15,1002,700,30));
+    assert((tp_bits&RTRIG) && tl_active);
+    touchpad_native_move(15,1002,702,30); assert(!window_touch_look_delta(&dx,&dy));
+    touchpad_native_move(15,1002,720,40); assert(window_touch_look_delta(&dx,&dy));
+    close_to(dx,20.0f/tv.w*3.14159265f); close_to(dy,10.0f/tv.w*3.14159265f);
+    touchpad_native_end(15,1002,725,40,0);
+    assert(!(tp_bits&RTRIG) && tp_aim_latched && !tl_active);
+    assert(window_touch_look_delta(&dx,&dy)); close_to(dx,5.0f/tv.w*3.14159265f);
+    assert(!window_touch_look_delta(&dx,&dy)); aim_tap(1003); assert(!tp_aim_latched); neutral();
+
+    /* Long holds and drags of L retain momentary shoulder behavior. */
+    assert(touchpad_native_begin(14,1004,100,30)); assert(tp_bits&LTRIG);
+    clock_ns+=300000000; window_touch_gameplay_tick(); touchpad_native_end(14,1004,100,30,0);
+    assert(!tp_aim_latched); neutral();
+    assert(touchpad_native_begin(14,1005,100,30)); touchpad_native_move(14,1005,120,30);
+    touchpad_native_end(14,1005,100,30,0); assert(!tp_aim_latched); neutral();
+    assert(touchpad_native_begin(15,1006,700,30)); touchpad_native_move(15,1006,740,30);
+    assert((tp_bits&RTRIG) && !window_touch_look_delta(&dx,&dy));
+    touchpad_native_end(15,1006,740,30,0); neutral(); // ordinary R never becomes look
+    aim_tap(1300); assert(touchpad_native_begin(15,1301,700,30));
+    touchpad_native_move(15,1301,720,30); aim_tap(1302);
+    assert(!tp_aim_latched && !tl_active && (tp_bits&RTRIG));
+    assert(!window_touch_look_delta(&dx,&dy)); touchpad_native_end(15,1301,720,30,0); neutral();
+
+    /* One look owner: R may shoot while a separate look finger keeps the camera. */
+    aim_tap(1007); SDL_Event e=start_look(500); e.type=SDL_EVENT_FINGER_MOTION; e.tfinger.x=0.7f;
+    assert(tp_zone_hold(&e)); assert(touchpad_native_begin(15,1008,700,30));
+    assert(tp_native[5].mode==TP_NATIVE_BUTTON); window_touch_look_delta(&dx,&dy);
+    touchpad_native_move(15,1008,760,30); assert(!window_touch_look_delta(&dx,&dy));
+    touchpad_native_end(15,1008,760,30,0); assert(tl_active && tp_aim_latched);
+    e.type=SDL_EVENT_FINGER_UP; touchpad_event(&e); touchpad_cancel_all();
+
+    /* Retired contacts cannot release a new R, and cancellation drops pending look. */
+    aim_tap(1009); assert(touchpad_native_begin(15,1010,700,30));
+    assert(!touchpad_native_begin(15,1011,700,30)); touchpad_native_end(15,1011,700,30,0);
+    assert(tp_bits&RTRIG); touchpad_cancel_all(); aim_tap(1012);
+    assert(touchpad_native_begin(15,1013,700,30)); touchpad_native_end(15,1010,700,30,1);
+    assert(tp_bits&RTRIG); touchpad_native_move(15,1013,730,30);
+    assert(touchpad_native_begin(10,1014,800,300)); touchpad_native_end(10,1014,800,300,1);
+    assert(tp_aim_latched && (tp_bits&RTRIG)); // a cancelled face button does not cancel aiming
+    touchpad_native_end(15,1013,0,0,1); assert(!tp_aim_latched && !(tp_bits&RTRIG));
+    assert(!window_touch_look_delta(&dx,&dy)); neutral();
+
+    /* Puzzle, menu, focus, setting and gameplay transitions clear assisted state. */
+    for (int reason=0;reason<10;reason++) {
+        shoot_ready(); aim_tap(1100); assert(touchpad_native_begin(15,1101,700,30));
+        touchpad_native_move(15,1101,730,30); touchpad_native_press(10);
+        switch(reason) {
+        case 0: game_gesture=1; break; case 1: game_twist=1; break;
+        case 2: rb_held=1; break; case 3: lb_held=1; break;
+        case 4: menu=1; break; case 5: dialog=1; break; case 6: input_focused=0; break;
+        case 7: values[5]=0; break; case 8: values[6]=0; break; default: clock_ns+=100000001; break;
+        }
+        tp_zone_tick(); assert(!tp_aim_latched && !(tp_bits&RTRIG) && !tl_active && (tp_bits&TRIANGLE));
+        assert(!window_touch_look_delta(&dx,&dy));
+    }
+    shoot_ready(); assert(touchpad_native_begin(14,1200,100,30));
+    values[6]=0; tp_zone_tick(); values[6]=1; touchpad_native_end(14,1200,100,30,0);
+    assert(!tp_aim_latched); neutral(); // re-enabling the option cannot revive a retired tap
+    for (int reason=0;reason<6;reason++) {
+        shoot_ready();
+        switch(reason) {
+        case 0: game_gesture=1; break; case 1: game_twist=1; break;
+        case 2: rb_held=1; break; case 3: values[5]=0; break;
+        case 4: values[6]=0; break; default: menu=1; break;
+        }
+        assert(!touchpad_native_shoot_available());
+        if (touchpad_native_begin(14,1400,100,30)) touchpad_native_end(14,1400,100,30,0);
+        assert(!tp_aim_latched);
+        if (touchpad_native_begin(15,1401,700,30)) {
+            touchpad_native_move(15,1401,740,30); assert(!window_touch_look_delta(&dx,&dy));
+            touchpad_native_end(15,1401,740,30,0);
+        }
+        neutral();
+    }
+    shoot_ready();
+    aim_tap(1201); assert(touchpad_native_begin(15,1202,700,30));
+    touchpad_set_mirror(1); touchpad_layout_for(932,430); assert(!tp_aim_latched && !tl_active); neutral();
+    aim_tap(1203); assert(tp_aim_latched); touchpad_cancel_all(); neutral(); // mirrored labels preserve L/R roles
+    aim_tap(1204); touchpad_set_on(0); touchpad_layout_for(932,430); assert(!tp_aim_latched); neutral();
+
+    /* The SDL button route and hardware button contribution retain their behavior. */
+    shoot_ready(); e=finger(SDL_EVENT_FINGER_DOWN,1205,tv.b[4].x/tv.w,tv.b[4].y/tv.h);
+    assert(touchpad_event(&e) && (tp_bits&LTRIG)); e.type=SDL_EVENT_FINGER_UP;
+    assert(touchpad_event(&e) && !tp_aim_latched); neutral();
+    buttons=LTRIG|CROSS; aim_tap(1206); aim_tap(1207);
+    window_input(&b,sticks); assert((b&(LTRIG|CROSS))==(LTRIG|CROSS)); buttons=0;
+    unsetenv("RECOMP_TOUCH_SHOOT"); aim_tap(1208); assert(!tp_aim_latched); neutral();
+    unsetenv("RECOMP_TOUCH_GAMEPLAY_GATE");
+    puts("PASS: native toggle aim/fire drag, final motion, normal L/R holds, exclusive camera owner, stale contacts, puzzle/menu/focus/preferences/layout resets, SDL and hardware input isolation");
+}
+int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); game_menu_routing(); native_shooting(); return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='nativ-touchpad-') as folder:
     source = Path(folder) / 'test.c'
@@ -384,6 +492,6 @@ with tempfile.TemporaryDirectory(prefix='nativ-touchpad-') as folder:
                str(source), '-lm', '-pthread', '-o', str(binary)]
     subprocess.run(command, check=True)
     test_env = os.environ.copy()
-    for key in ('RECOMP_TOUCHPAD', 'RECOMP_TOUCHPAD_RSTICK', 'RECOMP_STICK_HOLD', 'RECOMP_STICK_DRAG', 'RECOMP_TOUCH_LOOK', 'RECOMP_TOUCH_GAMEPLAY_GATE', 'RECOMP_YAW_DIAG'):
+    for key in ('RECOMP_TOUCHPAD', 'RECOMP_TOUCHPAD_RSTICK', 'RECOMP_STICK_HOLD', 'RECOMP_STICK_DRAG', 'RECOMP_TOUCH_LOOK', 'RECOMP_TOUCH_GAMEPLAY_GATE', 'RECOMP_TOUCH_SHOOT', 'RECOMP_YAW_DIAG'):
         test_env.pop(key, None)
     subprocess.run([str(binary)], check=True, env=test_env)

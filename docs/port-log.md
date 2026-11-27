@@ -867,3 +867,21 @@ paths and none in the loader/preparation changes. See
 Upgrade: `NativUncharted-test49-unsigned.ipa`, 42,307,267 bytes; SHA-256
 `0e38101e7983604ff98c5c687e238d4553b8e5d9b37047421a18bf158f92c4a5`.
 The earlier UI changes were pushed through `a8b9458`; shader changes are local.
+
+### Step 51 — two-thumb shooting: tap L to toggle aim, drag R to look while firing
+
+- Three fingers were the price of hold-L, look and fire at once. The
+  native buttons now do it with two: a short L tap (under 250 ms,
+  barely moved) toggles an aim hold on top of its normal momentary
+  press -- a second tap releases it -- and while that toggle is on,
+  dragging R steers the camera on the same displacement path touch
+  look uses, so firing and looking happen with one thumb on the
+  button. Lifting R stops firing and keeps the aim; everything long
+  or dragging on L stays the original momentary shoulder.
+- RECOMP_TOUCH_SHOOT=1 gates it to this pack, and only over the
+  native buttons with touch look on and Two-thumb shooting enabled;
+  physical pads, keyboard, mouse and the SDL-screen buttons are
+  untouched, and recognized puzzle prompts, menus, focus loss,
+  layout changes and hidden controls clear the synthetic state --
+  the suite covers each. Controls carries the toggle back to the
+  original behavior.

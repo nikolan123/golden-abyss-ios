@@ -973,6 +973,10 @@ static int tp_layout_valid;
 static void tp_clear(void);
 static struct { SDL_FingerID id; int which; float bx, by; } tpf[10];   /* which: 1 left stick, 2 right stick, 3 direct look, 10+i a button */
 static uint32_t tp_bits;
+static int tp_aim_latched;
+enum { TP_NATIVE_BUTTON, TP_NATIVE_AIM_TAP, TP_NATIVE_FIRE_LOOK };
+typedef struct { uint64_t id, at; float x, y; int mode, moved; } TpNativeContact;
+static TpNativeContact tp_native[8];
 static uint8_t tp_stick[4] = { 128, 128, 128, 128 };
 /* Direct touch look is enabled by packs with a camera hook that consumes the
  * displacement. UI events accumulate screen-width fractions as a single atomic
@@ -1043,10 +1047,40 @@ int window_touch_look_delta(float *dx, float *dy) {
 /* Only the UI thread owns layout and fingers. The game consumes one atomic input snapshot. */
 static uint64_t tp_input = UINT64_C(0x8080808000000000);
 static void tp_publish(void) {
-    const uint64_t state = (uint64_t)tp_bits | ((uint64_t)tp_stick[0] << 32) |
+    const uint32_t bits = tp_bits | (tp_aim_latched ? LTRIG : 0);
+    for (int i = 0; i < tv.nb; i++) tv.b[i].down = (bits & tv.b[i].bit) != 0;
+    const uint64_t state = (uint64_t)bits | ((uint64_t)tp_stick[0] << 32) |
         ((uint64_t)tp_stick[1] << 40) | ((uint64_t)tp_stick[2] << 48) | ((uint64_t)tp_stick[3] << 56);
     __atomic_store_n(&tp_input, state, __ATOMIC_RELEASE);
 }
+int touchpad_native_shoot_available(void) {
+#if IOS_UI_CHROME
+	const char *supported = getenv("RECOMP_TOUCH_SHOOT"), *look = getenv("RECOMP_TOUCH_LOOK");
+	return supported && *supported && *supported != '0' && look && *look &&
+		settings_int("touch_shoot", 1) && settings_int("touch_look", *look != '0') &&
+		tv.on && touchpad_on() && __atomic_load_n(&input_focused, __ATOMIC_ACQUIRE) &&
+		!overlay_is_open() && !overlay_dialog_active() && tl_gameplay_allowed() &&
+		!gesture_wanted() && !twist_wanted() && !lb_held && !rb_held;
+#else
+	return 0;
+#endif
+}
+int touchpad_native_aim_latched(void) { return tp_aim_latched; }
+static void tp_shoot_reset(int release_fire) {
+	int changed = tp_aim_latched;
+	tp_aim_latched = 0;
+	for (int i = 0; i < 8; i++) {
+		TpNativeContact *contact = &tp_native[i];
+		if (contact->mode == TP_NATIVE_AIM_TAP) { contact->mode = TP_NATIVE_BUTTON; changed = 1; }
+		else if (contact->mode == TP_NATIVE_FIRE_LOOK) {
+			tl_cancel(); changed = 1;
+			if (release_fire) { if (i < tv.nb) tp_bits &= ~tv.b[i].bit; memset(contact, 0, sizeof *contact); }
+			else contact->mode = TP_NATIVE_BUTTON;
+		}
+	}
+	if (changed) tp_publish();
+}
+static void tp_shoot_tick(void) { if (!touchpad_native_shoot_available()) tp_shoot_reset(1); }
 static int tp_scale_pct = -1, tp_mirror_on = -1;
 
 const TpVisual *touchpad_visuals(void) { return &tv; }
@@ -1226,6 +1260,7 @@ static int tp_zone_hold(const SDL_Event *e) {
 
 /* A stationary thumb sends no motion events; holding must still create its stick. */
 static void tp_zone_tick(void) {
+    tp_shoot_tick();
     if (!tv.on || !tv.w || overlay_is_open() || overlay_dialog_active()) return;
     if (!tl_gameplay_allowed()) { tp_stop_sticks(); return; }
     if (!window_touchpad_rstick() && !tl_want()) for (int i = 0; i < 10; i++) if (zwait[i].zone == 2) memset(&zwait[i], 0, sizeof zwait[i]);
@@ -1255,6 +1290,7 @@ static void tp_release(int which) {
 	tp_publish();
 }
 static void tp_stop_sticks(void) {
+    tp_shoot_reset(1);
     for (int i=0;i<10;i++) if (tpf[i].id && tpf[i].which>=1 && tpf[i].which<=3) {
         tp_release(tpf[i].which); memset(&tpf[i],0,sizeof tpf[i]);
     }
@@ -1263,6 +1299,7 @@ static void tp_stop_sticks(void) {
 }
 
 static void tp_clear(void) {
+	tp_aim_latched = 0; memset(tp_native, 0, sizeof tp_native);
 	memset(tpf, 0, sizeof tpf);
 	memset(zwait, 0, sizeof zwait);   /* a finger waiting to become a stick waits no more: the pad is taken away under the menu */
 	tp_bits = 0;
@@ -1302,6 +1339,57 @@ void touchpad_native_press(int which) {
 }
 void touchpad_native_release(int which) {
 	tp_release(which);
+}
+static TpNativeContact *tp_native_contact(int which, uint64_t id) {
+	const int i = which - 10;
+	return id && i >= 0 && i < tv.nb && tp_native[i].id == id ? &tp_native[i] : NULL;
+}
+int touchpad_native_begin(int which, uint64_t id, float x, float y) {
+	tp_shoot_tick();
+	const int i = which - 10;
+	if (!id || !isfinite(x) || !isfinite(y) || !tv.on || !tv.w || !touchpad_on() ||
+		!__atomic_load_n(&input_focused, __ATOMIC_ACQUIRE) || overlay_is_open() || overlay_dialog_active() ||
+		i < 0 || i >= tv.nb || tp_native[i].id) return 0;
+	TpNativeContact *contact = &tp_native[i];
+	*contact = (TpNativeContact){ .id=id, .at=SDL_GetTicksNS(), .x=x, .y=y };
+	if (touchpad_native_shoot_available()) {
+		if (tv.b[i].label == TP_LABEL_L) contact->mode = TP_NATIVE_AIM_TAP;
+		else if (tv.b[i].label == TP_LABEL_R && tp_aim_latched && !tl_active) {
+			contact->mode = TP_NATIVE_FIRE_LOOK;
+			tl_active = 1; tl_lx = x; tl_ly = y;
+		}
+	}
+	touchpad_native_press(which);
+	return 1;
+}
+void touchpad_native_move(int which, uint64_t id, float x, float y) {
+	tp_shoot_tick();
+	TpNativeContact *contact = tp_native_contact(which, id);
+	if (!contact || !isfinite(x) || !isfinite(y)) return;
+	const float distance = hypotf(x - contact->x, y - contact->y);
+	if (contact->mode == TP_NATIVE_AIM_TAP) { if (distance > 10) contact->moved = 1; }
+	else if (contact->mode == TP_NATIVE_FIRE_LOOK) {
+		if (!contact->moved && distance < 3) return;   /* preserve the first three points once the drag starts */
+		contact->moved = 1; tl_move(x, y);
+	}
+}
+void touchpad_native_end(int which, uint64_t id, float x, float y, int cancelled) {
+	tp_shoot_tick();
+	TpNativeContact *contact = tp_native_contact(which, id);
+	if (!contact) return;
+	if (!isfinite(x) || !isfinite(y)) cancelled = 1;
+	if (!cancelled) touchpad_native_move(which, id, x, y);
+	contact = tp_native_contact(which, id);
+	if (!contact) return;
+	const int shoulder = tv.b[which - 10].label == TP_LABEL_L || tv.b[which - 10].label == TP_LABEL_R;
+	if (cancelled && (contact->mode != TP_NATIVE_BUTTON || (shoulder && tp_aim_latched))) tp_shoot_reset(1);
+	else if (contact->mode == TP_NATIVE_AIM_TAP && !contact->moved &&
+		SDL_GetTicksNS() - contact->at <= 250000000ull && touchpad_native_shoot_available()) {
+		tp_aim_latched = !tp_aim_latched;
+		if (!tp_aim_latched) tp_shoot_reset(0);
+	} else if (contact->mode == TP_NATIVE_FIRE_LOOK) tl_active = 0;   /* consume the final displacement once */
+	memset(&tp_native[which - 10], 0, sizeof tp_native[0]);
+	touchpad_native_release(which);
 }
 static int touchpad_event(const SDL_Event *e) {
 	if (!tv.on || !tv.w) return 0;

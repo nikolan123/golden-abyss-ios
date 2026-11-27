@@ -68,6 +68,13 @@ float touchpad_eye_x(void);                   /* the eye's corner x: valid with 
 int touchpad_on(void);
 void touchpad_set_on(int on);
 void touchpad_cancel_all(void); /* UI thread: release every screen button, stick and pending hold */
+/* Native button contacts carry identity so cancelled/retired touches cannot
+ * release or move a newer contact. Positions are absolute window points. */
+int touchpad_native_begin(int which, uint64_t contact, float x, float y);
+void touchpad_native_move(int which, uint64_t contact, float x, float y);
+void touchpad_native_end(int which, uint64_t contact, float x, float y, int cancelled);
+int touchpad_native_shoot_available(void);
+int touchpad_native_aim_latched(void);
 int touchpad_scale(void);                 /* percent, 60..160 */
 void touchpad_set_scale(int percent);
 int touchpad_mirror(void);
