@@ -33,6 +33,7 @@ step "audio decoder (audiodec_test.c)" unit audiodec_test ${AVC[@]+"${AVC[@]}"} 
 step "controller button bindings (padbind_test.c)" unit padbind_test ../core/settings.c -lpthread
 step "message and text-input dialogs (commondlg_test.c)" unit commondlg_test -I stub -lpthread
 step "native overlay state and lifecycle (native_overlay_test.py)" $PY dev/tests/native_overlay_test.py
+step "shader recipes and startup preparation (shader_prep_test.py)" $PY dev/tests/shader_prep_test.py
 step "touch input and direct camera hooks (touchpad_test.py)" $PY dev/tests/touchpad_test.py
 step "NGS voice rules (ngs_rules_test.c)" unit ngs_rules_test
 step "the microphone (audioin_test.c)" unit audioin_test

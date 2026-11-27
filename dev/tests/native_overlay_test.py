@@ -29,6 +29,7 @@ static int settings_has(const char*) { return intro_stored; }
 static void settings_set_int(const char *key,int value) { assert(!strcmp(key,"controller_layout")); remembered=value; }
 static void settings_save() {}
 static void apply_pause() { paused=g_open || g_paused; }
+static void intro_end() { g_intro=false; g_paused=false; apply_pause(); }
 static int overlay_dialog_active() { return dialog; }
 static int gfx_gpu_shader_prep(int *done,int *total,double *eta) {
     *done=20; *total=100; *eta=10; int value=prep; if(prep==3) prep=0; return value;
@@ -76,9 +77,9 @@ int main() {
     g_quit_card=true; g_open=true; ++g_native_card_seq; apply_pause();
     overlay_native_state(&s); overlay_native_answer(s.kind,s.seq,1,0); assert(g_want_quit);
     g_want_quit=false; overlay_close();
-    intro_stored=0; g_toast_checked=false; prep=1;
+    intro_stored=0; g_toast_checked=false; prep=0;
     overlay_native_state(&s); assert(g_intro && !s.kind && !paused);
-    g_intro=false; overlay_native_state(&s); assert(s.kind==NATIVE_CARD_PREP && paused);
+    prep=1; overlay_native_state(&s); assert(!g_intro && s.kind==NATIVE_CARD_PREP && paused);
     overlay_frame(nullptr,nullptr,932,430,0.016); overlay_marks(nullptr,nullptr,932,430,0.016,nullptr,0,nullptr);
     assert(!rendered && native_marks==1); // the normal native path never constructs an ImGui frame
     native_mode=false; overlay_frame(nullptr,nullptr,932,430,0.016); assert(rendered==1);

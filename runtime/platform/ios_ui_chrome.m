@@ -766,6 +766,15 @@ static void cfg_page_display(void) {
 	});
 }
 static void cfg_page_performance(void) {
+	cfg_head("Startup");
+	{
+		int mode = settings_int("shader_prep", 2);
+		if (mode < 0 || mode > 2) mode = 2;
+		CfgRow *r = cfg_segrow("Shader preparation", @[@"Background", @"Automatic", @"Before Play"], mode, ^(int value) {
+			settings_set_int("shader_prep", value); settings_save();
+		});
+		r->detail = @"Before Play prepares available shaders before gameplay. Applies next launch; new shader combinations may still need to compile.";
+	}
 	cfg_head("Overlays");
 	{
 		CfgRow *r = cfg_segrow("On-screen stats", @[@"Off", @"FPS", @"Full"], overlay_stats_level(), ^(int i) {
@@ -1518,7 +1527,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test48 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test49 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill

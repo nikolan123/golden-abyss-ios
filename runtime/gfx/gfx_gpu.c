@@ -5406,10 +5406,20 @@ static char *rc_read(const char *path, size_t *len) {
 	FILE *f = fopen(path, "rb"); if (!f) return 0;
 	fseek(f, 0, SEEK_END); const long n = ftell(f); fseek(f, 0, SEEK_SET);
 	char *b = n >= 0 && n < (1L << 30) ? malloc((size_t)n + 1) : 0;
-	if (b && fread(b, 1, (size_t)n, f) == (size_t)n) { b[n] = 0; *len = (size_t)n; } else { free(b); b = 0; }
+	if (b && fread(b, 1, (size_t)n, f) == (size_t)n) {
+		/* Windows checkouts can ship CRLF recipes. Normalize before checking the
+		 * header and hashed records; a trailing CR otherwise rejects both. */
+		size_t out = 0;
+		for (size_t i = 0; i < (size_t)n; i++) {
+			if (b[i] == '\r' && i + 1 < (size_t)n && b[i + 1] == '\n') continue;
+			b[out++] = b[i];
+		}
+		b[out] = 0; *len = out;
+	} else { free(b); b = 0; }
 	fclose(f); return b;
 }
 static const char *shader_cache_dir(void); static void warm_open(const char *dir);   /* (the warm-up, below) */
+static void prep_begin(void); static int prep_blocking(void);
 static void recipes_load(void) {   /* once, on the render thread: the shipped recipes and this machine's, and the file open for this session's */
 	if (rc.state) return;
 	rc.state = -1;
@@ -5494,6 +5504,7 @@ static void recipes_load(void) {   /* once, on the render thread: the shipped re
 		warm_open(cache);
 		gxp_index_start(app0, cache, predict_on() ? 0 : want, nwant);   /* (predicting: every program in the files) */
 		rc.warm_phase = 1;
+		prep_begin();
 	}
 	free(want);
 }
@@ -5789,8 +5800,10 @@ static void pred_throttle(int on) {   /* the predicted pass builds on at most RE
                                        * session's own builds queue behind whatever the OS's shader compiler already has (Killzone, every
                                        * shader cold: draws waited 9-17 s with the pass on 6 workers against 4.4 s without it) */
 	pthread_mutex_lock(&bq_m);
-	if (on && pred_low_cap < 0) { static int n = -1; if (n < 0) { const char *e = getenv("RECOMP_SHADER_PREDICT_WORKERS"); n = e && atoi(e) > 0 ? atoi(e) : 2; }
-		pred_low_cap = bq_bulk_cap; bq_bulk_cap = n; }   /* (the bulk lane only: a level's own prebuilds, bq_head[2], keep every low worker) */
+	if (on && (pred_low_cap < 0 || on == 2)) { static int n = -1; if (n < 0) { const char *e = getenv("RECOMP_SHADER_PREDICT_WORKERS"); n = e && atoi(e) > 0 ? atoi(e) : 2; }
+		if (pred_low_cap < 0) pred_low_cap = bq_bulk_cap;
+		bq_bulk_cap = on == 2 && prep_blocking() ? bq_workers : n;
+		pthread_cond_broadcast(&bq_c); }   /* the foreground pass uses all workers; Skip restores the background cap */
 	else if (!on && pred_low_cap >= 0) { bq_bulk_cap = pred_low_cap; pred_low_cap = -1; pthread_cond_broadcast(&bq_c); }
 	pthread_mutex_unlock(&bq_m);
 }
@@ -5814,39 +5827,71 @@ void gfx_gpu_quit(void) {   /* the window closes (window.c: _exit, no atexit han
  * the progress and Skip, and every build worker takes the warm-up (no reserve for draws: the game is paused). The
  * paused game doesn't present, so the window's loop steps the warm-up instead (gfx_gpu_shader_prep_tick: any pause,
  * the menu's too). Later starts find the OS's shader cache warm and finish under the limit: no card. An update's new
- * recipes, or an OS update that cleared the cache, bring it back for what's missing. Settings "shader_prep" 0: never;
- * RECOMP_SHADER_PREP=0 never, =1 always (the card's own test). The predicted shaders that follow the recipes aren't
- * waited for: they build behind the game as before. */
+ * recipes, or an OS update that cleared the cache, bring it back for what's missing.
+ * shader_prep: 0 background, 1 automatic, 2 before play (the iOS default). Before
+ * play shows the card from indexing through the predicted pass, unless skipped.
+ * RECOMP_SHADER_PREP overrides the setting; 1 always shows the automatic card. */
 enum { PREP_OFF, PREP_MEASURE, PREP_QUIET, PREP_CARD, PREP_BACKGROUND, PREP_FINISHED };
 static int prep_state;   /* (under the renderer lock; read by the overlay without it) */
-static int prep_total, prep_reserve = -1, prep_said; static uint64_t prep_t0, prep_first, prep_rate_t; static uint32_t prep_rate_n; static double prep_rate;
+static int prep_total, prep_reserve = -1, prep_said, prep_full, prep_predicting;
+static uint64_t prep_t0, prep_first, prep_rate_t, prep_rate_milli; static uint32_t prep_rate_n; static double prep_rate;
 static int prep_force(void) { static int v = -2; if (v == -2) { const char *e = getenv("RECOMP_SHADER_PREP"); v = e && *e ? atoi(e) : -1; } return v; }
+static int prep_mode(void) {
+	static int mode = -1;
+	if (mode < 0) {
+#ifdef SDL_PLATFORM_IOS
+		const int fallback = 2;
+#else
+		const int fallback = 1;
+#endif
+		mode = prep_force() >= 0 ? prep_force() : settings_int("shader_prep", fallback);
+		if (mode < 0 || mode > 2) mode = fallback;
+	}
+	return mode;
+}
+static int prep_status(void) { return __atomic_load_n(&prep_state, __ATOMIC_ACQUIRE); }
+static int prep_blocking(void) { return prep_status() == PREP_CARD; }
+static void prep_progress(int total) {
+	prep_t0 = prep_rate_t = rc_us(); prep_first = 0; prep_rate_n = 0; prep_rate = 0;
+	__atomic_store_n(&prep_rate_milli, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&prep_built, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&prep_total, total, __ATOMIC_RELAXED);
+}
 static void prep_workers(int all) {   /* the card up: every worker on the warm-up; down: the reserve for draws back */
 	pthread_mutex_lock(&bq_m);
-	if (all && prep_reserve < 0) { prep_reserve = bq_low_cap; bq_low_cap = bq_workers; pthread_cond_broadcast(&bq_c); }
+	if (all && prep_blocking() && bq_workers > 0 && prep_reserve < 0) { prep_reserve = bq_low_cap; bq_low_cap = bq_workers; pthread_cond_broadcast(&bq_c); }
 	else if (!all && prep_reserve >= 0) { bq_low_cap = prep_reserve; prep_reserve = -1; }
 	pthread_mutex_unlock(&bq_m);
 }
+static void prep_begin(void) {   /* indexing can run before the first build worker exists */
+	extern int window_active(void);
+	prep_full = prep_mode() == 2 && window_active() && bq_workers >= 0 && gpu_async();
+	prep_progress(0);
+	__atomic_store_n(&prep_state, prep_full ? PREP_CARD : PREP_OFF, __ATOMIC_RELEASE);
+}
 static void prep_start(void) {   /* the warm-up's builds begin: rc.w_need_sh shaders and rc.w_need_pp pipelines */
 	extern int window_active(void); extern int settings_int(const char *, int);
-	prep_total = rc.w_need_sh + rc.w_need_pp; prep_t0 = prep_rate_t = rc_us(); prep_first = 0; prep_rate_n = 0; prep_rate = 0;
-	__atomic_store_n(&prep_built, 0, __ATOMIC_RELAXED);
-	const int f = prep_force();
-	prep_state = f == 0 || !window_active() || bq_workers <= 0 || !gpu_async() || (f < 0 && !settings_int("shader_prep", 1)) ? PREP_OFF : PREP_MEASURE;
+	prep_progress(rc.w_need_sh + rc.w_need_pp);
+	if (prep_full) return;   /* preserve an indexing-stage Skip */
+	__atomic_store_n(&prep_state, !prep_mode() || !window_active() || bq_workers <= 0 || !gpu_async() ? PREP_OFF : PREP_MEASURE, __ATOMIC_RELEASE);
 }
 static void prep_finish(void) {   /* the recipes' builds are all done */
-	if (prep_state == PREP_OFF || prep_state == PREP_FINISHED) return;
-	if (prep_state != PREP_QUIET) fprintf(stderr, "    gpu: shader prep: %d builds in %.1f s%s\n", prep_total, (rc_us() - prep_t0) / 1e6, prep_state == PREP_BACKGROUND ? " (skipped: built behind the game)" : "");
-	__atomic_store_n(&prep_state, prep_state == PREP_QUIET ? PREP_OFF : PREP_FINISHED, __ATOMIC_RELEASE);
+	const int st = prep_status();
+	if (st == PREP_OFF || st == PREP_FINISHED) return;
+	if (st != PREP_QUIET) fprintf(stderr, "    gpu: shader prep: %u builds in %.1f s%s\n", __atomic_load_n(&prep_built, __ATOMIC_RELAXED), (rc_us() - prep_t0) / 1e6, st == PREP_BACKGROUND ? " (skipped: built behind the game)" : "");
+	__atomic_store_n(&prep_state, st == PREP_QUIET ? PREP_OFF : PREP_FINISHED, __ATOMIC_RELEASE);
 	prep_workers(0);
 }
 static void prep_update(void) {   /* each warm-up step: the rate, and whether to ask for the card */
-	if (prep_state != PREP_MEASURE && prep_state != PREP_CARD && prep_state != PREP_BACKGROUND) return;
+	const int st = prep_status();
+	if (st != PREP_MEASURE && st != PREP_CARD && st != PREP_BACKGROUND) return;
+	if (prep_full && st == PREP_CARD) prep_workers(1);
 	const uint64_t now = rc_us(); const uint32_t b = __atomic_load_n(&prep_built, __ATOMIC_RELAXED);
 	if (now - prep_rate_t >= 1000000) {   /* (the rate over the last second or so, smoothed: the card's speed, not the measuring's) */
 		const double r = (b - prep_rate_n) / ((now - prep_rate_t) / 1e6); prep_rate = prep_rate > 0 ? prep_rate * 0.7 + r * 0.3 : r; prep_rate_t = now; prep_rate_n = b;
+		__atomic_store_n(&prep_rate_milli, (uint64_t)(prep_rate * 1000), __ATOMIC_RELAXED);
 	}
-	if (prep_state != PREP_MEASURE) return;
+	if (st != PREP_MEASURE) return;
 	if (b && !prep_first) { prep_first = now; prep_rate_t = now; prep_rate_n = b; }
 	/* the rate from the first build done, not from the start: the first cold compiles take a while to come back (Uncharted's
 	 * cold start: none done at 2 s, all 268 at 5.2 s), and counted from the start they made a 5 s warm-up look endless */
@@ -5862,29 +5907,43 @@ static void prep_update(void) {   /* each warm-up step: the rate, and whether to
 /* the overlay's view: 0 nothing to show, 1 the card, 2 skipped (building behind the game: the corner line), 3 just
  * finished after showing either (once); done / total builds, seconds left (< 0: not known yet) */
 int gfx_gpu_shader_prep(int *done, int *total, double *eta_s) {
-	const int st = __atomic_load_n(&prep_state, __ATOMIC_ACQUIRE);
+	const int st = prep_status();
 	const int d = (int)__atomic_load_n(&prep_built, __ATOMIC_RELAXED);
-	*total = prep_total; *done = d < prep_total ? d : prep_total;
-	*eta_s = prep_rate > 0 ? (prep_total - *done) / prep_rate : -1;
+	const uint64_t rate = __atomic_load_n(&prep_rate_milli, __ATOMIC_RELAXED);
+	*total = __atomic_load_n(&prep_total, __ATOMIC_RELAXED); *done = d < *total ? d : *total;
+	*eta_s = rate && *total > 0 ? (*total - *done) * 1000.0 / rate : -1;
 	if (st == PREP_FINISHED) { if (!__atomic_exchange_n(&prep_said, 1, __ATOMIC_ACQ_REL)) return 3; return 0; }
 	return st == PREP_CARD ? 1 : st == PREP_BACKGROUND ? 2 : 0;
 }
 void gfx_gpu_shader_prep_skip(void) {   /* the card's Skip (any thread): the game goes on, the builds behind it */
 	int c = PREP_CARD;
-	if (__atomic_compare_exchange_n(&prep_state, &c, PREP_BACKGROUND, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { fprintf(stderr, "    gpu: shader prep: skipped at %u of %d\n", __atomic_load_n(&prep_built, __ATOMIC_RELAXED), prep_total); prep_workers(0); }
+	if (__atomic_compare_exchange_n(&prep_state, &c, PREP_BACKGROUND, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		fprintf(stderr, "    gpu: shader prep: skipped at %u of %d\n", __atomic_load_n(&prep_built, __ATOMIC_RELAXED), __atomic_load_n(&prep_total, __ATOMIC_RELAXED));
+		prep_workers(0);
+		if (__atomic_load_n(&prep_predicting, __ATOMIC_ACQUIRE)) pred_throttle(2);
+	}
 }
 static void recipes_step(void);   /* (below) */
 void gfx_gpu_shader_prep_tick(void) {   /* the window's loop, while the game is paused (under the lock): the warm-up goes on without presents */
 	if (gpu() && rc.warm_phase && rc.warm_phase != 5) recipes_step();
 }
 static void warm_recipes_done(void) {   /* the recipes' warm-up is queued: the predicted shaders next, or done */
-	prep_finish();
+	if (!prep_full) prep_finish();
 	warm_archive();
 	if (predict_on() && gxp_index_count()) {
-		rc.warm_phase = 6; rc.pred_at = 0; rc.pred_t0 = rc_us(); pred_throttle(1);
+		if (prep_full) prep_progress(0);   /* the additional variants have no fixed build count */
+		__atomic_store_n(&prep_predicting, 1, __ATOMIC_RELEASE);
+		rc.warm_phase = 6; rc.pred_at = 0; rc.pred_t0 = rc_us(); pred_throttle(prep_full ? 2 : 1);
 		if (pipe_predict_on()) { pred_states(); if (rc.npst) rc.stand_vs = stand_in_vs(); }
 	}
-	else rc.warm_phase = 5;
+	else { rc.warm_phase = 5; if (prep_full) prep_finish(); }
+}
+static void warm_predictions_done(void) {
+	rc.warm_phase = 5;
+	if (rc.stand_vs) { warm_unref(rc.stand_vs); rc.stand_vs = 0; }
+	pred_throttle(0);
+	__atomic_store_n(&prep_predicting, 0, __ATOMIC_RELEASE);
+	if (prep_full) prep_finish();
 }
 static void recipes_warm_slice(uint64_t t0, uint64_t budget) {
 	while (rc.warm_phase == 2 && rc_us() - t0 < budget) {   /* each recipe's keys */
@@ -5947,11 +6006,9 @@ static void recipes_warm_slice(uint64_t t0, uint64_t budget) {
 	if (rc.warm_phase == 7) {
 		pthread_mutex_lock(&bq_m); const int left = bq_low; pthread_mutex_unlock(&bq_m);
 		if (!left) {
-			rc.warm_phase = 5;
 			fprintf(stderr, "    gpu: shader recipes: predicted shaders: %d fragment programs in the game's files without a recipe -- %d shaders built and released, %d warm already, %d not translated (%d programs had recipes); %d pipelines in %d states built, %d warm already; %.1f s\n",
 			        rc.p_frag, rc.p_sh, rc.p_warm, rc.p_fail, rc.p_recorded, rc.p_pp, rc.npst, rc.p_pp_warm, (rc_us() - rc.pred_t0) / 1e6);
-			if (rc.stand_vs) { warm_unref(rc.stand_vs); rc.stand_vs = 0; }
-			pred_throttle(0);
+			warm_predictions_done();
 		}
 	}
 }

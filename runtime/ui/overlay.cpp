@@ -2190,6 +2190,7 @@ extern "C" void overlay_native_state(NativeOverlayState *state) {
     }
     const int ps = gfx_gpu_shader_prep(&state->done, &state->total, &state->eta);
     state->prep_state = ps;
+    if (ps == 1 && g_intro) intro_end();   /* startup preparation takes priority over the running-game hint */
     if (g_prep_card && ps != 1) {
         g_prep_card = false; g_open = g_quit_card || g_layout_card; g_paused = false; apply_pause();
     }

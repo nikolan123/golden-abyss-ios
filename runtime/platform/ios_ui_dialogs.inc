@@ -449,7 +449,11 @@ static NDRequest nd_request(NativeOverlayState host) {
         r.seq=host.seq;
         if (host.kind == NATIVE_CARD_QUIT) { r.kind=ND_QUIT; r.title=@"Quit game?"; r.body=@"Progress since your last save will be lost."; r.labels=@[@"Keep playing",@"Quit game"]; r.back=0; }
         else if (host.kind == NATIVE_CARD_LAYOUT) { r.kind=ND_LAYOUT; r.title=@"Controller layout"; r.body=@"Standard keeps the handheld touch controls. PS TV uses the game's controller-only layout. This choice applies until you quit."; r.labels=@[@"Standard",@"PS TV"]; r.back=-1; }
-        else { r.kind=ND_PREP; r.title=@"Preparing shaders"; r.body=[NSString stringWithFormat:@"Building shaders for this phone.\n%d of %d ready.\nYou can skip and let preparation continue while you play.",host.done,host.total]; r.labels=@[@"Skip"]; r.back=0; r.percent=host.total ? (int)(100.0*host.done/host.total) : 0; }
+        else {
+            r.kind=ND_PREP; r.title=@"Preparing shaders";
+            r.body=host.total > 0 ? [NSString stringWithFormat:@"Building shaders for this phone.\n%d of %d ready.\nYou can skip and let preparation continue while you play.",host.done,host.total] : @"Preparing shaders for this phone.\nYou can skip and let preparation continue while you play.";
+            r.labels=@[@"Skip"]; r.back=0; r.percent=host.total > 0 ? (int)(100.0*host.done/host.total) : -1;
+        }
         return r;
     }
     if (overlay_is_open()) return r; /* full settings owns the screen until Done */
@@ -489,7 +493,7 @@ static void nd_tick(void) {
         else {
             if (![nd_body.text isEqualToString:body]) nd_body.text=body;
             nd_progress.hidden=r.percent<0; nd_progress.progress=fmaxf(0,fminf(1,r.percent/100.0f));
-            const BOOL wait=(r.kind==ND_SAVE_WAIT || r.kind==ND_MESSAGE) && !r.labels.count && r.percent<0;
+            const BOOL wait=r.percent<0 && (r.kind==ND_PREP || ((r.kind==ND_SAVE_WAIT || r.kind==ND_MESSAGE) && !r.labels.count));
             if(wait) [nd_spinner startAnimating]; else [nd_spinner stopAnimating];
             nd_layout(); [g_host bringSubviewToFront:nd_dim]; [g_host bringSubviewToFront:nd_card];
         }
