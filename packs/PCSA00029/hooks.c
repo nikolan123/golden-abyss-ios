@@ -272,6 +272,14 @@ void recomp_hook_uc_gesture_press(Cpu *c) {
 static uint32_t uc_succeeded[8];
 void recomp_hook_uc_gesture_update(Cpu *c) {   /* fn_812021e6, r0 the gesture */
 	uint32_t o = c->r[0];
+	{	/* a gesture object is updating: the game is listening for a swipe or a shape right now --
+	 * the melee finisher's up/down prompts included. Tell the input layer, so the touch look
+	 * stands down for its window and the drag reaches the game's own recognizer instead of
+	 * turning the camera (window.c's gesture_wanted; nothing but these updates feeds it in
+	 * this pack, and gesture objects only exist while a prompt wants their gesture). */
+		extern void window_touch_gesture_hint(void);
+		window_touch_gesture_hint();
+	}
 	for (int i = 0; i < 8; i++) if (uc_succeeded[i] == o) {
 		uc_succeeded[i] = 0;
 		if (RD32(o + 0xd0) != 2) return;
@@ -1162,6 +1170,7 @@ static void uc_camera_diag(void) {
 	fprintf(stderr, "%s\n", line);
 }
 static float uc_mx, uc_my; static int uc_age;   /* pending radians; discarded if no camera consumes them within a few frames */
+static float uc_nx, uc_ny;   /* the nudge's direction (one axis, unit) as last written -- its own small turn subtracts before the magnet */
 void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
 	(void)reg;
 	static int diag = -1; if (diag < 0) diag = getenv("RECOMP_YAW_DIAG") != 0;
@@ -1186,7 +1195,9 @@ void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
 	if (uc_mx == 0 && uc_my == 0) uc_age = 0;
 	uc_mx += dx; uc_my += dy;
 	float x, y; uint32_t bx = RD32(pad + 0x354), by = RD32(pad + 0x358); memcpy(&x, &bx, 4); memcpy(&y, &by, 4);
-	if (fabsf(dx) >= fabsf(dy)) x = dx > 0 ? 0.6f : -0.6f; else y = dy > 0 ? 0.6f : -0.6f;
+	uc_nx = uc_ny = 0;
+	if (fabsf(dx) >= fabsf(dy)) { x = dx > 0 ? 0.6f : -0.6f; uc_nx = dx > 0 ? 1.0f : -1.0f; }
+	else { y = dy > 0 ? 0.6f : -0.6f; uc_ny = dy > 0 ? 1.0f : -1.0f; }
 	memcpy(&bx, &x, 4); memcpy(&by, &y, 4); WR32(pad + 0x354, bx); WR32(pad + 0x358, by);
 	if (diag) { static int n; if (n++ % 20 == 0) fprintf(stderr, "uc_mouse_look: dx=%g dy=%g\n", dx, dy); }
 }
@@ -1195,26 +1206,52 @@ void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
  * camera) stored the message's direction times its turn speeds at +0x160/+0x164 (radians a frame, about
  * 0.075 at full tilt): direct input replaces the turn with its pending radians.
  * Mouse counts are scaled at input time; touch has its own screen-width scale. */
+/* the magnet's strength ("aim_magnet", Controls; the pack's RECOMP_AIM_MAGNET its default):
+ * 0 replaces the game's turn as before; above it, the game's own aim assist -- measured on
+ * the device (Step 56's trace): a pull up to ~0.01 rad/frame toward its chosen target, on
+ * top of the nudge's own ~0.002 turn along the drag -- is kept and amplified. */
+static float uc_aim_magnet(void) {
+	const char *e = getenv("RECOMP_AIM_MAGNET");
+	float k = settings_float("aim_magnet", e && *e ? (float)atof(e) : 0.0f);
+	if (!(k > 0)) k = 0;
+	if (k > 10) k = 10;
+	return k;
+}
 void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 	(void)reg;
+	uint32_t cam = c->r[0], pbx = RD32(cam + 0x160), pby = RD32(cam + 0x164);
+	float px, py; memcpy(&px, &pbx, 4); memcpy(&py, &pby, 4);
 	{	/* RECOMP_UC_AIM_TRACE: what the game itself stored as the camera's look velocity this
 	 * frame -- its own aim assist's contribution rides it when the option has it on -- logged
-	 * before the touch path replaces it. The magnetism round's ground truth: a firefight with
-	 * the game's Auto Aim on, then one with it off, and the difference between the two logs
-	 * is the assist itself. */
+	 * before the touch path replaces it. */
 		static int on = -1; if (on < 0) on = getenv("RECOMP_UC_AIM_TRACE") != 0;
 		if (on) {
 			static int n; if (n++ % 20 == 0) {
 				extern uint64_t display_frames(void);
-				uint32_t cam = c->r[0], bx = RD32(cam + 0x160), by = RD32(cam + 0x164);
-				float px, py; memcpy(&px, &bx, 4); memcpy(&py, &by, 4);
 				fprintf(stderr, "uc aim: frame %llu the game's v (%.4f, %.4f), touch pending (%.4f, %.4f)\n", (unsigned long long)display_frames(), px, py, uc_mx, uc_my);
 			}
 		}
 	}
 	if (uc_mx == 0 && uc_my == 0) return;
-	float vx = uc_mx, vy = uc_my; uint32_t bx, by; memcpy(&bx, &vx, 4); memcpy(&by, &vy, 4);
-	uint32_t cam = c->r[0];
+	/* the magnet: the assist's own component (the game's turn minus the nudge's residue, a
+	 * fixed ~0.002 rad/frame along the drag) scales by the strength and adds to the exact
+	 * touch deltas -- the pull toward the target at what a thumb can feel. Lowpassed, so a
+	 * pull that flips sign at the target's centre eases over it instead of jittering, and
+	 * clamped, so a scripted turn never becomes a lurch. */
+	static float mag_x, mag_y;
+	float vx = uc_mx, vy = uc_my;
+	const float k = uc_aim_magnet();
+	if (k > 0) {
+		float gx = px - uc_nx * 0.002f, gy = py - uc_ny * 0.002f;
+		mag_x += (gx * k - mag_x) * 0.5f;
+		mag_y += (gy * k - mag_y) * 0.5f;
+		if (mag_x > 0.05f) mag_x = 0.05f;
+		if (mag_x < -0.05f) mag_x = -0.05f;
+		if (mag_y > 0.05f) mag_y = 0.05f;
+		if (mag_y < -0.05f) mag_y = -0.05f;
+		vx += mag_x; vy += mag_y;
+	} else mag_x = mag_y = 0;
+	uint32_t bx, by; memcpy(&bx, &vx, 4); memcpy(&by, &vy, 4);
 	WR32(cam + 0x160, bx); WR32(cam + 0x164, by);
 	uc_mx = uc_my = 0; uc_age = 0;
 	if (getenv("RECOMP_YAW_DIAG")) { static int n; if (n++ % 20 == 0) fprintf(stderr, "uc_look_velocity: cam %#x v %.4f %.4f\n", cam, vx, vy); }

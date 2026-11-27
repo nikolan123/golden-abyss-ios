@@ -981,3 +981,28 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   contribution -- the thing to amplify, or the proof that a
   host-side magnet (the enemy actor list, live-traced) is the
   only way to effortless.
+
+### Step 57 — the aim magnet, and the melee QTE's swipes back
+
+- The trace answered the assist question: with the game's Auto Aim
+  on, its pull reaches ~0.01 rad/frame toward its chosen target
+  (visible with the touch finger at rest); off, the camera's own
+  value collapses to the nudge's ~0.002 residue. The assist is
+  real, proportional, and feeble.
+- The magnet amplifies it: the camera hook keeps the game's own
+  velocity where it used to replace it -- the touch deltas stay
+  exact, the assist's component (the game's value minus the
+  nudge's residue along the drag) scales by the strength and adds.
+  Lowpassed, so a pull flipping sign at the target's centre eases
+  over it rather than jittering, and clamped. The game's own
+  targeting logic picks the enemy; the magnet only makes its pull
+  felt. Controls -> "Aim magnet" (0-10, the pack's default 5);
+  zero restores the plain camera exactly.
+- The melee QTE's up/down swipes were eaten by touch look: the
+  gesture-hint machinery existed but nothing in this pack fed
+  it, and unlike the puzzles the melee finishers keep the player
+  controller live. uc_gesture_update now tells the input layer a
+  gesture is listening -- the look stands down for its window and
+  the drag reaches the game's own recognizer (the machete and
+  rubbing prompts take the same road, now by signal as well as by
+  the puzzle state).

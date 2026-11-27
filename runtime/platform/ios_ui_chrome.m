@@ -884,6 +884,12 @@ static void cfg_page_controls(void) {
 		cfg_slider("Look sensitivity", 30, 1000, (float)(settings_float("touch_sens", 4.0) * 100.0), 1, ^(double v) {
 			settings_set_float("touch_sens", v / 100.0); settings_save();
 		});
+		{	/* the game's own aim assist, amplified: 0 is the plain camera; the pack's default from RECOMP_AIM_MAGNET */
+			const char *e = getenv("RECOMP_AIM_MAGNET");
+			cfg_slider("Aim magnet", 0, 10, (float)settings_float("aim_magnet", e && *e ? atof(e) : 0.0), 1, ^(double v) {
+				settings_set_float("aim_magnet", (float)v); settings_save();
+			});
+		}
 	}
 	{
 		const char *supported = getenv("RECOMP_TOUCH_SHOOT");
