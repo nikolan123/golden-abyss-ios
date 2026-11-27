@@ -15,7 +15,8 @@ cut-short final record remain intact.
 iOS defaults to **Before Play** preparation. The startup card begins while
 shader programs are being indexed from the installed game files, stays active
 through known shader/pipeline builds, and waits for the additional predicted
-fragment variants. The first-launch controls hint no longer delays this card.
+fragment variants. The first-launch controls hint is deferred until preparation
+finishes, so it remains available on a fresh install.
 The game resumes only after preparation completes or the player chooses Skip.
 
 Skip works during indexing, known builds and the extra pass. It restores the
