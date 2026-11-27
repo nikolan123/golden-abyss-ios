@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Golden Abyss for iOS: the app icon, drawn here in one place and rendered to every size by make-icon.py.
+     Full bleed (iOS masks the corners itself); nothing of a game, of Sony's art or of Nativ's own mark. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="36%" r="82%">
+      <stop offset="0" stop-color="#1e523d"/>
+      <stop offset="0.5" stop-color="#123328"/>
+      <stop offset="1" stop-color="#050d0b"/>
+    </radialGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#fff3c9"/>
+      <stop offset="0.3" stop-color="#f2c76c"/>
+      <stop offset="0.62" stop-color="#cc9530"/>
+      <stop offset="1" stop-color="#8a5b13"/>
+    </linearGradient>
+    <linearGradient id="bronze" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#e0b268"/>
+      <stop offset="0.55" stop-color="#a97a2c"/>
+      <stop offset="1" stop-color="#6d4a11"/>
+    </linearGradient>
+    <linearGradient id="leather" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#251a10"/>
+      <stop offset="0.45" stop-color="#4a3522"/>
+      <stop offset="1" stop-color="#1d1410"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- the map under the dagger: faint carved contours -->
+  <g fill="none" stroke="#6fae8c" stroke-width="2.5" opacity="0.075">
+    <circle cx="512" cy="470" r="190"/>
+    <circle cx="512" cy="470" r="265"/>
+    <circle cx="512" cy="470" r="350"/>
+    <circle cx="512" cy="470" r="450"/>
+    <circle cx="512" cy="470" r="560"/>
+  </g>
+  <g fill="none" stroke="#8dc6a6" stroke-width="3" opacity="0.05">
+    <path d="M-40 800 C 200 720 320 780 520 720 C 720 660 860 710 1080 640"/>
+    <path d="M-40 890 C 220 820 340 870 540 810 C 760 745 880 800 1080 730"/>
+  </g>
+
+  <!-- the dagger: shadow, blade, guard, grip, pommel -->
+  <g transform="rotate(-24 512 512) translate(512 512) scale(1.22) translate(-512 -512)">
+    <g filter="url(#shadow)" opacity="0.55">
+      <path d="M512 150 C 528 290 540 440 545 542 L 479 542 C 484 440 496 290 512 150 Z" fill="#000"/>
+      <rect x="446" y="540" width="132" height="32" rx="13" fill="#000"/>
+      <rect x="492" y="570" width="40" height="120" rx="10" fill="#000"/>
+      <circle cx="512" cy="712" r="24" fill="#000"/>
+    </g>
+
+    <path d="M512 148 C 528 290 540 440 545 546 L 479 546 C 484 440 496 290 512 148 Z" fill="url(#blade)"/>
+    <path d="M512 156 C 502 300 494 440 492 546 L 512 546 Z" fill="#fff8dc" opacity="0.20"/>
+    <path d="M512 214 L 512 522" stroke="#9a6a1c" stroke-width="5" stroke-linecap="round" opacity="0.40"/>
+
+    <rect x="446" y="544" width="132" height="30" rx="13" fill="url(#bronze)"/>
+    <rect x="452" y="550" width="120" height="18" rx="8" fill="#1a1208" opacity="0.22"/>
+
+    <rect x="492" y="572" width="40" height="118" rx="10" fill="url(#leather)"/>
+    <g stroke="#170f08" stroke-width="7" stroke-linecap="round" opacity="0.5">
+      <path d="M494 588 L 530 578"/>
+      <path d="M494 610 L 530 600"/>
+      <path d="M494 632 L 530 622"/>
+      <path d="M494 654 L 530 644"/>
+      <path d="M494 676 L 530 666"/>
+    </g>
+
+    <circle cx="512" cy="712" r="24" fill="url(#bronze)"/>
+    <circle cx="512" cy="712" r="9" fill="#1a1208" opacity="0.5"/>
+  </g>
+</svg>

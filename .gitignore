@@ -7,6 +7,8 @@ __pycache__/
 .DS_Store
 # build outputs: Dear ImGui's objects, gfxreplay and the other tools, the gate's logs; the launcher beside its source
 build/
+# the packaged app: an ipa carries the game's own data, and never belongs in a repository
+dist/
 launcher/nativ
 launcher/nativ.exe
 launcher/SDL3.dll

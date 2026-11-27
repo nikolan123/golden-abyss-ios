@@ -1,15 +1,16 @@
 """
-Package a Nativ iOS build into an unsigned .ipa.
+Package a Golden Abyss for iOS build into an unsigned .ipa.
 
   python pack-ios.py <title> [--app-name Name] [--smoke]
 
-Builds <out>/<Name>.app from a recompiled title and zips Payload/<Name>.app with the unix
-permissions iOS expects (the executable 0755, everything else 0644). The bundle carries the
-game data and the runtime's images; the iOS bootstrap in runtime/core/main.c turns them into
-the command line and the fs/ layout.
+Builds <out>/GoldenAbyss.app from a recompiled title and zips Payload/GoldenAbyss.app with the unix permissions
+iOS expects (the executable 0755, everything else 0644). The bundle carries the game data, the runtime's images
+and the app icon: the game's own, sce_sys/icon0.png out of your copy, as pipeline/steam.py takes a game's art for a
+Steam shortcut (--icon <png> takes another, and the drawn set in AppIcon/ is the fallback a smoke build uses).
 
-  --smoke   no game data: the runtime alone, a ~40 MB ipa that boots and reports what it
-            misses. The data of an installed Nativ build is reused from beside it.
+  --smoke   no game data: the runtime alone, a ~40 MB ipa that boots and reports what it misses. The data of an
+            installed Golden Abyss build is reused from beside it, and the bundle id gets a .smoke suffix so it
+            installs beside the real one instead of replacing it.
 
 Deflated: the bulk of a bundle is the game's own archive, which compresses ~1.3x.
 
@@ -22,9 +23,12 @@ import subprocess
 import sys
 import zipfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import icons   # (beside this script: the icon set, from the game's own art or the drawn fallback)
+
 TITLE = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "PCSA00029"
 SMOKE = "--smoke" in sys.argv          # no game data: the runtime alone, ~40 MB, for a cheap first boot
-NAME = "NativUncharted" + ("-smoke" if SMOKE else "")
+NAME = "GoldenAbyss" + ("-smoke" if SMOKE else "")
 if "--app-name" in sys.argv:
     NAME = sys.argv[sys.argv.index("--app-name") + 1]
 
@@ -34,9 +38,15 @@ OUT = os.path.join(WORK, "recomp")
 DIST = os.environ.get("ATIV_IPA_OUT") or os.path.join(ROOT, "dist")
 APP = os.path.join(DIST, NAME + ".app")
 DATA = os.path.join(APP, "data")
+ICONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "AppIcon")
 
-BUNDLE_ID = "dev.nativ" + ("." + NAME.lower())
+BUNDLE_ID = "net.nikolan.goldenabyss" + (".smoke" if SMOKE else "")
+DISPLAY_NAME = "Golden Abyss"
 EXE = "game_host"
+
+# the names icons.py writes; iOS looks them up by point size and picks the file for the screen
+ICON_FILES = ["Icon-20", "Icon-29", "Icon-40", "Icon-60"]
+ICON_PLIST = "".join(f"\t\t<string>{n}</string>\n" for n in ICON_FILES)
 
 INFO_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,10 +57,22 @@ INFO_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 \t<key>CFBundleIdentifier</key><string>{BUNDLE_ID}</string>
 \t<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 \t<key>CFBundleName</key><string>{NAME}</string>
-\t<key>CFBundleDisplayName</key><string>{NAME}</string>
+\t<key>CFBundleDisplayName</key><string>{DISPLAY_NAME}</string>
 \t<key>CFBundlePackageType</key><string>APPL</string>
 \t<key>CFBundleShortVersionString</key><string>0.1</string>
 \t<key>CFBundleVersion</key><string>1</string>
+\t<key>CFBundleIconFiles</key>
+\t<array>
+{ICON_PLIST}\t</array>
+\t<key>CFBundleIcons</key>
+\t<dict>
+\t\t<key>CFBundlePrimaryIcon</key>
+\t\t<dict>
+\t\t\t<key>CFBundleIconFiles</key>
+\t\t<array>
+{ICON_PLIST}\t\t\t</array>
+\t\t</dict>
+\t</dict>
 \t<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
 \t<key>LSRequiresIPhoneOS</key><true/>
 \t<key>MinimumOSVersion</key><string>15.0</string>
@@ -111,6 +133,20 @@ def main():
 
     with open(os.path.join(APP, "Info.plist"), "w", newline="\n", encoding="utf-8") as f:
         f.write(INFO_PLIST)
+
+    # the icon: the game's own (sce_sys/icon0.png, out of the player's copy -- nothing of it is in this repository),
+    # another with --icon, else the drawn set; every size, beside the executable where iOS reads them
+    game_icon = os.path.join(WORK, "app0", "sce_sys", "icon0.png")
+    icon_src = sys.argv[sys.argv.index("--icon") + 1] if "--icon" in sys.argv else (game_icon if os.path.isfile(game_icon) else "")
+    if icon_src:
+        print(f"  icon <- {icon_src}")
+        icons.from_image(icon_src, APP)
+    elif os.path.isdir(ICONS):
+        for png in sorted(os.listdir(ICONS)):
+            if png.endswith(".png"):
+                shutil.copy2(os.path.join(ICONS, png), os.path.join(APP, png))
+    else:
+        sys.exit(f"no app icon: no {game_icon} in your copy, and no drawn set at {ICONS}")
 
     shutil.copy2(os.path.join(OUT, EXE), os.path.join(APP, EXE))
 
