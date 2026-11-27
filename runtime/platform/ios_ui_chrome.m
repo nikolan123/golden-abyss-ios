@@ -601,6 +601,19 @@ static UIVisualEffectView *blur_fill(UIView *host, UIBlurEffectStyle st) {
 	[v release];
 	return v;
 }
+static NSTimeInterval chrome_duration(NSTimeInterval seconds) {
+    return UIAccessibilityIsReduceMotionEnabled() ? 0 : seconds;
+}
+static UIButtonConfiguration *chrome_button_style(NSString *title, BOOL prominent, BOOL destructive) {
+    UIButtonConfiguration *style;
+    if (@available(iOS 26.0, *)) style = prominent ? [UIButtonConfiguration prominentGlassButtonConfiguration] : [UIButtonConfiguration glassButtonConfiguration];
+    else style = prominent ? [UIButtonConfiguration filledButtonConfiguration] : [UIButtonConfiguration tintedButtonConfiguration];
+    style.title = title; style.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    style.buttonSize = UIButtonConfigurationSizeLarge;
+    style.baseBackgroundColor = destructive ? [UIColor systemRedColor] : [UIColor systemBlueColor];
+    style.baseForegroundColor = prominent ? [UIColor whiteColor] : destructive ? [UIColor systemRedColor] : [UIColor systemBlueColor];
+    return style;
+}
 
 /* one row's model: a kind, its texts, and the block that applies it (the same call the ImGui row took).
  * No ARC: every string is born owned (alloc/init or a literal) and the row releases them all. */
