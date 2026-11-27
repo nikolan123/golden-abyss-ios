@@ -411,6 +411,12 @@ static void native_shooting(void) {
     assert(touchpad_native_begin(15,1006,700,30)); touchpad_native_move(15,1006,740,30);
     assert((tp_bits&RTRIG) && !window_touch_look_delta(&dx,&dy));
     touchpad_native_end(15,1006,740,30,0); neutral(); // ordinary R never becomes look
+    /* a thumb holding L (no latch) is an aim input too: R drags with it */
+    assert(touchpad_native_begin(14,1400,100,30)); assert(tp_bits&LTRIG);
+    clock_ns+=300000000; window_touch_gameplay_tick();   /* a long hold, not a tap */
+    assert(touchpad_native_begin(15,1401,700,30)); touchpad_native_move(15,1401,720,30);
+    assert((tp_bits&RTRIG) && window_touch_look_delta(&dx,&dy));
+    touchpad_native_end(15,1401,720,30,0); touchpad_native_end(14,1400,100,30,0); neutral();
     aim_tap(1300); assert(touchpad_native_begin(15,1301,700,30));
     touchpad_native_move(15,1301,720,30); aim_tap(1302);
     assert(!tp_aim_latched && !tl_active && (tp_bits&RTRIG));

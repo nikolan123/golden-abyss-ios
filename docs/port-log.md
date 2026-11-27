@@ -921,3 +921,27 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   device's own orientation names are each other's inverses). The
   two rows swap, and both the accelerometer and the gyroscope
   rotate consistently again.
+
+### Step 54 — R drags with L held, and the system's edge gestures defer to the game
+
+- Two-thumb shooting's R drag now arms on any aim input: the latched
+  toggle or a thumb simply holding L. The latch stays as the one-thumb
+  convenience it was; the two-thumb hold-L-and-drag-R play needs no
+  ceremony. The suite covers the held case (a 300 ms hold, past the
+  tap window) and the unarmed one (nothing held: R stays a trigger).
+- The system can no longer take the game away with one swipe: the
+  root view controller now reports the game's preference -- the home
+  bar hides, and every edge gesture (home, notification, control
+  centre) defers: a first swipe only peeks, a second, deliberate one
+  acts. A runtime subclass of SDL's own controller carries the two
+  overrides; the settings menus keep normal gestures (the system
+  asks the presented controller, not the root, while they are up).
+- The game's own Auto Aim option (Options -> Aiming, difficulty-gated
+  in its frontend) does nothing on the touch camera path. The two
+  candidates: the engine ignores the flag where our hooks bypass it,
+  or the assist rides the camera's "set look velocity" -- the exact
+  call uc_look_velocity replaces with touch radians, wiping the
+  assist with it. A stick-aim experiment on the device (the floating
+  second stick, auto-aim on) separates them; an additive-look mode
+  is the fix if the assist rides the velocity, and a deeper engine
+  trace is next if it does not.

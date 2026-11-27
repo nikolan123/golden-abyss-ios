@@ -1366,7 +1366,7 @@ int touchpad_native_begin(int which, uint64_t id, float x, float y) {
 	*contact = (TpNativeContact){ .id=id, .at=SDL_GetTicksNS(), .x=x, .y=y };
 	if (touchpad_native_shoot_available()) {
 		if (tv.b[i].label == TP_LABEL_L) contact->mode = TP_NATIVE_AIM_TAP;
-		else if (tv.b[i].label == TP_LABEL_R && tp_aim_latched && !tl_active) {
+		else if (tv.b[i].label == TP_LABEL_R && !tl_active && (tp_aim_latched || (tp_bits & LTRIG))) {   /* any aim input held -- the latch or a thumb on L -- drags the camera with R */
 			contact->mode = TP_NATIVE_FIRE_LOOK;
 			tl_active = 1; tl_lx = x; tl_ly = y;
 		}

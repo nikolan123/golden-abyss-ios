@@ -1484,9 +1484,37 @@ int ios_ui_chrome_sync_window(int logical_w, int logical_h, int text_input, int 
     return 1;
 }
 
+/* the game's overrides for the system's edge gestures (ios_ui_chrome_install's runtime subclass) */
+static BOOL nativ_edges_yes(id self, SEL _cmd) { (void)self; (void)_cmd; return YES; }
+static UIRectEdge nativ_edges_all(id self, SEL _cmd) { (void)self; (void)_cmd; return UIRectEdgeAll; }
+
 void ios_ui_chrome_install(void *native_window) {
     if (g_installed || !native_window || ![NSThread isMainThread]) return;
     g_win = (UIWindow *)native_window;
+    /* the system's edge gestures defer to the game while it plays: the home bar hides, and
+     * the first swipe from any edge only peeks -- a second, deliberate one acts. A runtime
+     * subclass of the window's own root controller carries the two overrides (SDL owns that
+     * class's source; this never touches it). */
+    {
+        UIViewController *root = g_win.rootViewController;
+        static Class game_class;
+        if (root) {
+            if (!game_class) {
+                game_class = objc_allocateClassPair(object_getClass(root), "NativDeferredEdges", 0);
+                if (game_class) {
+                    class_addMethod(game_class, @selector(prefersHomeIndicatorAutoHidden), (IMP)nativ_edges_yes, "B@:");
+                    class_addMethod(game_class, @selector(preferredScreenEdgesDeferringSystemGestures), (IMP)nativ_edges_all, "Q@:");
+                    objc_registerClassPair(game_class);
+                }
+            }
+            if (game_class && object_getClass(root) != game_class) {
+                object_setClass(root, game_class);
+                if ([root respondsToSelector:@selector(setNeedsUpdateOfScreenEdgesDeferringSystemGestures)]) [root setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+                if ([root respondsToSelector:@selector(setNeedsUpdateOfHomeIndicatorAutoHidden)]) [root setNeedsUpdateOfHomeIndicatorAutoHidden];
+                chrome_log("    chrome: the system's edge gestures defer to the game -- a second swipe leaves it");
+            }
+        }
+    }
     const char *off = getenv("RECOMP_NATIVE_CHROME");
     if (off && off[0] == '0' && off[1] == '\0') return;
     /* The old pad-only fallback now selects the entire legacy renderer, so its
