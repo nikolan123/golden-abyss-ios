@@ -1006,3 +1006,24 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   the drag reaches the game's own recognizer (the machete and
   rubbing prompts take the same road, now by signal as well as by
   the puzzle state).
+
+### Step 58 — the magnet stood down; the lock-on's raw material, captured
+
+- The magnet rode the game's own assist, and that ceiling is the
+  problem: the assist picks its target only inside its own cone and
+  pulls proportionally -- amplified it aims near enemies but never
+  locks, and outside the cone it does nothing. Uncharted 4-style
+  magnetism needs the target list itself, hard-snapped and tracked
+  while visible. The pack's RECOMP_AIM_MAGNET goes to 0 by default;
+  the slider stays for whoever wants the soft pull back.
+- The lock-on's data source is the renderer's own frame list: the
+  game must enumerate every visible actor to draw it, and the
+  port already enlarged those pools -- the list (+0xeb0), the
+  64-byte items, the frame's count (+0xeac) are addresses the
+  renderer hooks already know. RECOMP_UC_LOCK_TRACE (this pack,
+  once a second) dumps a tenth of a frame's items -- a frame
+  aiming at an enemy against one looking at scenery tells the
+  actor-link word from the transform floats -- plus the player
+  controller's registers (the anchor for reaching the actor list
+  next round) and the camera field diff (RECOMP_YAW_DIAG) for the
+  camera's world position and orientation.

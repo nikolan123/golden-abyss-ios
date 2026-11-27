@@ -598,6 +598,35 @@ void recomp_hook_uc_slide_tick(Cpu *c) { (void)c; extern void window_tilt_tick(i
 void recomp_hook_uc_items_reset(Cpu *c) {
 	uint32_t n = RD32(c->r[0] + 0xeac);
 	if (n > uc_items_peak) uc_items_peak = n;
+	/* RECOMP_UC_LOCK_TRACE: the render list's items, once a second while tracing -- the lock-on
+	 * round's raw material. The list (+0xeb0) holds pointers to this frame's 64-byte items; the
+	 * dump shows a tenth of them (a frame that aims at an enemy against one that looks at plain
+	 * scenery tells the actor-link word from the transform floats). The player controller's
+	 * registers ride along from uc_gameplay_touch's own dump below. */
+	{
+		static int on = -1; if (on < 0) on = getenv("RECOMP_UC_LOCK_TRACE") != 0;
+		if (on) {
+			static uint64_t last_f;
+			extern uint64_t display_frames(void);
+			const uint64_t f = display_frames();
+			if (f - last_f >= 60) {
+				last_f = f;
+				uint32_t r = c->r[0], list = RD32(r + 0xeb0);
+				uint32_t cnt = RD32(r + 0xeac);
+				fprintf(stderr, "uc items: frame %llu renderer %#x count %u peak %u list %#x\n",
+					(unsigned long long)f, r, cnt, uc_items_peak, list);
+				if (cnt > 40) cnt = 40;
+				for (uint32_t i = 0; i < cnt; i += 4) {
+					uint32_t it = RD32(list + 4 * i);
+					if (!it) continue;
+					fprintf(stderr, "uc item %u: %#x %#x %#x %#x | %#x %#x %#x %#x | %#x %#x %#x\n", i,
+						RD32(it), RD32(it + 4), RD32(it + 8), RD32(it + 12),
+						RD32(it + 16), RD32(it + 20), RD32(it + 24), RD32(it + 28),
+						RD32(it + 32), RD32(it + 36), RD32(it + 40));
+				}
+			}
+		}
+	}
 }
 /* The pools themselves, made 4x larger (8192 items): fn_812419d0, the renderer's setup (once, from
  * fn_8124570e), allocates the item storage (+0xea4, 64 bytes an item), the array of pointers to them
@@ -1259,6 +1288,21 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 /* fn_810ee968's player-controller update, after the owned-object and eligibility
  * checks at 0x810ee974/0x810ee982. Main-menu screens do not reach this body. */
 void recomp_ihook_uc_gameplay_touch(Cpu *c, int reg) {
-    (void)c; (void)reg;
+    (void)reg;
+    /* RECOMP_UC_LOCK_TRACE: the player-controller update's registers, once a second -- the
+     * controller object's address, the anchor the actor list is reached from. */
+    {
+        static int on = -1; if (on < 0) on = getenv("RECOMP_UC_LOCK_TRACE") != 0;
+        if (on) {
+            static uint64_t last_f;
+            extern uint64_t display_frames(void);
+            const uint64_t f = display_frames();
+            if (f - last_f >= 60) {
+                last_f = f;
+                fprintf(stderr, "uc gameplay: frame %llu r0 %#x r1 %#x r2 %#x r3 %#x lr %#x\n",
+                    (unsigned long long)f, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+            }
+        }
+    }
     window_touch_gameplay_tick();
 }
