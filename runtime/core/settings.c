@@ -85,6 +85,12 @@ const char *settings_str(const char *key, const char *def, char *buf, int bufsiz
 	return buf;
 }
 int settings_int(const char *key, int def) { char b[96]; if (!settings_has(key)) return def; return atoi(settings_str(key, "", b, sizeof b)); }
+int settings_frame_rate(void) {
+	if (!settings_game_option("frame_rate")) return 30;
+	const char *e = getenv("RECOMP_FRAME_RATE_DEFAULT");
+	const int fallback = e && atoi(e) >= 60 ? 60 : 30;
+	return settings_int("frame_rate", fallback) >= 60 ? 60 : 30;
+}
 double settings_float(const char *key, double def) { char b[96]; if (!settings_has(key)) return def; return atof(settings_str(key, "", b, sizeof b)); }
 /* a shared key goes to the shared file and the game's override of it goes: a change made in any game's menu is made
  * for every game. The game's own options (and everything, with no shared file) stay in its own file. */

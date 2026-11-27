@@ -1759,7 +1759,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test44 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test45 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill

@@ -761,3 +761,24 @@ camera hooks are exercised together under sanitizers, including matching turns
 at 30/60 fps and 100,000 concurrent direct-look updates. The existing touch/pad
 regressions and iOS build pass. See `docs/ios-touch-look-test44.md` for the cause,
 behavior, validation and remaining device checks.
+
+### Step 52 — test45 Uncharted defaults
+
+Uncharted now defaults to experimental 60 fps and direct touch-camera input.
+The optional second stick defaults off. Saved choices still apply, and the
+frame-rate menu can switch between 30 and 60 during play.
+
+`RECOMP_FRAME_RATE_DEFAULT` supplies the pack's fallback through one shared
+settings getter used by the renderer and menu. It does not force the frame
+rate like `RECOMP_FRAME_RATE`; unsupported games retain their 30 fps fallback.
+Checks exercise the actual settings and display selection code under sanitizers
+for the new default, saved/menu choices, unsupported games, explicit overrides,
+forced capture rates and scheduled test changes. Pack configuration validation
+also passes. Touch displacement and sensitivity are unchanged from test44;
+the game's final 30/60 fps camera-response comparison still requires a device.
+
+The arm64 iOS build and IPA validation passed, including the embedded defaults,
+exact executable equality and HTTP download length. Artifact:
+`NativUncharted-test45-unsigned.ipa`, 42,305,194 bytes; SHA-256
+`3355d204b3faa0d8aa4925c1d23ce9123b6167b49a7ac2e71f71a4b95b271508`.
+Check/build/package records are under `C:/ProgramData/t3/nativ-test45-*`.

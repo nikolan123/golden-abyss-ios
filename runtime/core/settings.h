@@ -55,7 +55,8 @@
  *                             camera update, Uncharted's render camera; culling included; RECOMP_FOV wins; read live, so the
  *                             menu's slider applies at once)
  *   frame_rate    display.c   30 | 60                   60: the swap interval capped at one vblank
- *                             (experimental; RECOMP_FRAME_RATE wins; read every frame)
+ *                             (experimental; RECOMP_FRAME_RATE wins; read every frame;
+ *                             RECOMP_FRAME_RATE_DEFAULT supplies the pack's fallback when unset)
  *   touch_cursor_speed  window.c  a multiplier, 1.0 default   the bumper touch cursor's speed (either stick)
  *   gyro          motion.c    0 | 1 (default 1)         a DS4/DualSense gyro as the Vita's motion sensor
  *   gyro_pose     motion.c    upright | flat            which Vita pose a pad held level stands for
@@ -88,5 +89,6 @@ void settings_clear_own(const char *key);   /* drops the game's own value of a k
 void settings_save(void);   /* writes the changed files now, merged with them as they are on disk (the setters don't) */
 int settings_shared_dir(char *buf, int n);   /* the shared file's folder, with its separator (0: none -- a test, or RECOMP_SETTINGS) */
 int settings_game_option(const char *name);   /* this game's pack offers that option (RECOMP_GAME_OPTIONS, its RUN_ENV: "fov,online") */
+int settings_frame_rate(void); /* saved 30/60 choice, then pack default; 30 for games without frame-rate hooks */
 
 #endif

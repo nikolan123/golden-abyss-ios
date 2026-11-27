@@ -143,6 +143,7 @@ int metrics_osd_lines(char (*out)[40], int max);   /* the F1 overlay's text, dra
 /* settings.c */
 int settings_has(const char *key);
 int settings_int(const char *key, int def);
+int settings_frame_rate(void);
 double settings_float(const char *key, double def);
 void settings_set_int(const char *key, int v);
 void settings_set_float(const char *key, double v);
@@ -303,7 +304,7 @@ static struct { bool loaded; float fov, view, scen, chr, tcs, gyro_sens, vol, de
 static void prefs_load(void) {
 	if (P.loaded) return;
 	char b[16];
-	P.fov = (float)settings_float("fov", 1.0); P.fr = settings_int("frame_rate", 30);
+	P.fov = (float)settings_float("fov", 1.0); P.fr = settings_frame_rate();
 	P.view = (float)settings_float("view_distance", 1.0);
 	P.scen = (float)settings_float("scenery_detail", 1.0);
 	P.chr = (float)settings_float("character_detail", 1.0);
