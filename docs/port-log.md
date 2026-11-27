@@ -1027,3 +1027,25 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   controller's registers (the anchor for reaching the actor list
   next round) and the camera field diff (RECOMP_YAW_DIAG) for the
   camera's world position and orientation.
+
+### Step 59 — the capture round that fixes the position: the actor's own object, its render packet and the camera's raw block
+
+- Step 58's capture settled identity and visibility: an item's words
+  2/3 are -1 exactly for moving actors, and word 10 is one owner
+  pointer shared by every mesh part of one actor -- enemies appear
+  as groups of items owning 0x12b7eb90/0x12ce2e30/0x12c8d270 while
+  the player's parts own the controller+0x1d0, so the player excludes
+  by the gameplay hook's own controller address. The PVS work already
+  knew the instances keep a bounding sphere at +0x60, so the position
+  is one hop away: in the item's owner object, its render packet
+  (word 4) or the words past 10 that the first round never dumped.
+- The trace (RECOMP_UC_LOCK_TRACE, once a second) now dumps all
+  sixteen words of each sampled item, and for every dynamic actor
+  also 128 bytes at its owner and 64 at its packet; the active
+  camera's first 0x200 bytes ride along raw (the field-diff diag
+  never showed anything -- the two camera objects alternate, so
+  every second's comparison was against a different base), and the
+  header marks the aim latch, so the seconds spent aiming stand out
+  in the log. One fight played against this build gives the enemy
+  positions, the camera's own position and basis, and the frames they
+  were aimed in.

@@ -600,29 +600,58 @@ void recomp_hook_uc_items_reset(Cpu *c) {
 	if (n > uc_items_peak) uc_items_peak = n;
 	/* RECOMP_UC_LOCK_TRACE: the render list's items, once a second while tracing -- the lock-on
 	 * round's raw material. The list (+0xeb0) holds pointers to this frame's 64-byte items; the
-	 * dump shows a tenth of them (a frame that aims at an enemy against one that looks at plain
-	 * scenery tells the actor-link word from the transform floats). The player controller's
-	 * registers ride along from uc_gameplay_touch's own dump below. */
+	 * dump shows a tenth of them, all sixteen words of each: the first round fixed the actor link
+	 * (word 10: one owner pointer shared by every mesh part of one moving actor, the player's its
+	 * controller+0x1d0, while scenery owns resource-arena pointers) and the dynamic flag (words
+	 * 2/3 = -1). What the words past 10 hold, and the owner's own object (the PVS instances keep
+	 * a bounding sphere at +0x60) and the render packet (word 4), carry the position this round
+	 * needs; the camera's raw block rides along for the aim frame's own position and basis. The
+	 * aim latch marks the seconds spent aiming, and the player controller's registers come from
+	 * uc_gameplay_touch's own dump below. */
 	{
 		static int on = -1; if (on < 0) on = getenv("RECOMP_UC_LOCK_TRACE") != 0;
 		if (on) {
 			static uint64_t last_f;
 			extern uint64_t display_frames(void);
+			extern int touchpad_native_aim_latched(void);
 			const uint64_t f = display_frames();
 			if (f - last_f >= 60) {
 				last_f = f;
 				uint32_t r = c->r[0], list = RD32(r + 0xeb0);
 				uint32_t cnt = RD32(r + 0xeac);
-				fprintf(stderr, "uc items: frame %llu renderer %#x count %u peak %u list %#x\n",
-					(unsigned long long)f, r, cnt, uc_items_peak, list);
+				fprintf(stderr, "uc items: frame %llu aim %u renderer %#x count %u peak %u list %#x\n",
+					(unsigned long long)f, (unsigned)touchpad_native_aim_latched(), r, cnt, uc_items_peak, list);
 				if (cnt > 40) cnt = 40;
 				for (uint32_t i = 0; i < cnt; i += 4) {
 					uint32_t it = RD32(list + 4 * i);
 					if (!it) continue;
-					fprintf(stderr, "uc item %u: %#x %#x %#x %#x | %#x %#x %#x %#x | %#x %#x %#x\n", i,
+					fprintf(stderr, "uc item %u: %#x %#x %#x %#x | %#x %#x %#x %#x | %#x %#x %#x %#x | %#x %#x %#x %#x\n", i,
 						RD32(it), RD32(it + 4), RD32(it + 8), RD32(it + 12),
 						RD32(it + 16), RD32(it + 20), RD32(it + 24), RD32(it + 28),
-						RD32(it + 32), RD32(it + 36), RD32(it + 40));
+						RD32(it + 32), RD32(it + 36), RD32(it + 40), RD32(it + 44),
+						RD32(it + 48), RD32(it + 52), RD32(it + 56), RD32(it + 60));
+					if (RD32(it + 8) == 0xffffffffu) {
+						uint32_t own = RD32(it + 40), pkt = RD32(it + 16);
+						if (own) {
+							fprintf(stderr, "uc own %#x:", own);
+							for (uint32_t k = 0; k < 32; k++) fprintf(stderr, " %#x", RD32(own + 4 * k));
+							fprintf(stderr, "\n");
+						}
+						if (pkt) {
+							fprintf(stderr, "uc pkt %#x:", pkt);
+							for (uint32_t k = 0; k < 16; k++) fprintf(stderr, " %#x", RD32(pkt + 4 * k));
+							fprintf(stderr, "\n");
+						}
+					}
+				}
+				{
+					uint32_t mgr = RD32(0x81905310u), cam = 0;
+					if (mgr && RD32(mgr + 0x60)) { uint32_t p = RD32(RD32(mgr + 0x5c)); if (p) cam = RD32(p + 8); }
+					for (uint32_t row = 0; cam && row < 8; row++) {
+						fprintf(stderr, "uc camraw %#x+%#x:", cam, 0x40 * row);
+						for (uint32_t k = 0; k < 16; k++) fprintf(stderr, " %#x", RD32(cam + 0x40 * row + 4 * k));
+						fprintf(stderr, "\n");
+					}
 				}
 			}
 		}
