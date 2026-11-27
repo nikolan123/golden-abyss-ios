@@ -1208,3 +1208,27 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   writes the real param itself once it saves, and the
   Files app can finally see it. One round with that file
   attached ends the guessing.
+
+### Step 65 — the snap aim stands down
+
+- The lock-on tried three channels across four device
+  rounds -- the camera's look velocity, the same gated to
+  the manager's active camera, and finally the pad's look
+  stick -- and none of them held up on the device: the aim
+  camera damps the velocity channel forty-fold, the store
+  site runs for cameras the player is not looking through,
+  and the stick path arrived too late to be proven before
+  patience with the feature ran out. The call: not worth
+  more rounds. Everything aim-assist is gone: the snap
+  aim and its toggle, the magnet and its slider, the
+  target table, the capture traces (RECOMP_UC_LOCK_TRACE,
+  the aim and yaw diag env flags in the pack), the
+  touchpad's aim-held query, and their tests.
+- The shipped save goes with it: the bundling, the
+  first-boot restore, the slot-param export, and the
+  playtest's own save files out of the pack (and out of
+  the repository's history -- a public fork is no place
+  for them). Every other gain stays: the MetalFX upscale,
+  the touch look and two-thumb shooting, the melee QTE's
+  swipes, tilt via CoreMotion, the gesture deferral, the
+  view-distance pools, and the rest of the controls.

@@ -75,7 +75,6 @@ void touchpad_native_move(int which, uint64_t contact, float x, float y);
 void touchpad_native_end(int which, uint64_t contact, float x, float y, int cancelled);
 int touchpad_native_shoot_available(void);
 int touchpad_native_aim_latched(void);
-int touchpad_native_aim_held(void);
 int touchpad_scale(void);                 /* percent, 60..160 */
 void touchpad_set_scale(int percent);
 int touchpad_mirror(void);

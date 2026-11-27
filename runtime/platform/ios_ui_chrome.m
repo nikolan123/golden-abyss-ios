@@ -884,20 +884,6 @@ static void cfg_page_controls(void) {
 		cfg_slider("Look sensitivity", 30, 1000, (float)(settings_float("touch_sens", 4.0) * 100.0), 1, ^(double v) {
 			settings_set_float("touch_sens", v / 100.0); settings_save();
 		});
-		{
-			/* Uncharted 4-style: while aim is held the camera snaps to the nearest visible enemy and tracks it */
-			const char *e = getenv("RECOMP_UC_SNAP");
-			CfgRow *r = cfg_switch("Snap aim", settings_int("snap_aim", !(e && *e == '0')), ^(int to) {
-				settings_set_int("snap_aim", to); settings_save();
-			});
-			r->detail = @"While aiming: hold the camera on the nearest enemy you can see.";
-		}
-		{	/* the game's own aim assist, amplified: 0 is the plain camera; the pack's default from RECOMP_AIM_MAGNET */
-			const char *e = getenv("RECOMP_AIM_MAGNET");
-			cfg_slider("Aim magnet", 0, 10, (float)settings_float("aim_magnet", e && *e ? atof(e) : 0.0), 1, ^(double v) {
-				settings_set_float("aim_magnet", (float)v); settings_save();
-			});
-		}
 	}
 	{
 		const char *supported = getenv("RECOMP_TOUCH_SHOOT");
