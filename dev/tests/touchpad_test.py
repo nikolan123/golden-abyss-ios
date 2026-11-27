@@ -378,15 +378,15 @@ static void snap_aim_lock(void) {
     assert(!RD32(0x760) && !RD32(0x764));             /* the nearer bearing is dead ahead: nothing to add */
     uc_lock_n = 1;                                    /* the ahead one dies; the 45-degree one is what's left */
     recomp_ihook_uc_look_velocity(&c, 0);
-    close_to(guest_float(0x760), 0.45f); assert(!RD32(0x764));   /* a hard pull, clamped at the snap rate */
+    close_to(guest_float(0x760), atanf(1.0f)*0.5f); assert(!RD32(0x764));   /* a hard pull: half the error lands once, the frame takes it twice */
     WR32(0x760, 0); WR32(0x764, 0);
     uc_lock_n = 2; uc_lock_p[1][0] = 1.0f; uc_lock_p[1][2] = -5.0f;   /* a fresh actor appears at a better bearing */
     recomp_ihook_uc_look_velocity(&c, 0);
-    close_to(guest_float(0x760), atanf(1.0f/5.0f));    /* the held 45-degree one is far outside hysteresis: the lock hands over */
+    close_to(guest_float(0x760), atanf(1.0f/5.0f)*0.5f);    /* the held 45-degree one is far outside hysteresis: the lock hands over */
     WR32(0x760, 0); WR32(0x764, 0);
     uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = -10.0f; uc_lock_n = 1;   /* the 45-degree one alone again */
     recomp_ihook_uc_look_velocity(&c, 0);
-    close_to(guest_float(0x760), 0.45f);
+    close_to(guest_float(0x760), atanf(1.0f)*0.5f);
     WR32(0x760, 0); WR32(0x764, 0);
     uc_lock_p[0][0] = 0.0f; uc_lock_p[0][2] = -2.0f;   /* within 3 m of the lens: the player, never a target */
     recomp_ihook_uc_look_velocity(&c, 0);
@@ -400,7 +400,7 @@ static void snap_aim_lock(void) {
     assert(!RD32(0x760) && !RD32(0x764));
     tp_bits |= LTRIG;
     recomp_ihook_uc_look_velocity(&c, 0);              /* it takes the target again when aim returns */
-    close_to(guest_float(0x760), 0.45f);
+    close_to(guest_float(0x760), atanf(1.0f)*0.5f);
     WR32(0x760, 0); WR32(0x764, 0);
     setenv("RECOMP_UC_SNAP", "0", 1);                  /* the pack's kill-switch: off */
     recomp_ihook_uc_look_velocity(&c, 0);

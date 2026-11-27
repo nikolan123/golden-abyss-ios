@@ -1090,3 +1090,38 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   inside hysteresis, the player's 3 m exclusion, the
   behind-the-lens skip, the release and the env
   kill-switch.
+
+### Step 61 — the lock's first device round: the wobble read out of the log, three ways
+
+- The first test59 fight log showed the lock writing to the
+  camera's velocity in alternating signs, frame after frame,
+  at a steady amplitude -- a ring that never settles. Three
+  causes, all read from the same log:
+- The store site runs for several camera objects a frame
+  (0x1147e4f0 with 0x11475730/0x11474e80 in the same
+  seconds), and the lock's held-actor memory was one static
+  shared by all of them -- each camera's call overwrote the
+  chosen target, so the hysteresis could never hold and the
+  nearest-bearing pick ping-ponged. The held actor is now
+  kept per camera, and a camera whose +0x40 does not hold an
+  orthonormal matrix (norms near one, rows mutually
+  perpendicular) gets no lock writes at all -- the basis
+  the error is computed from has to be a real camera.
+- The target table filled its 24 slots in a six-man fight:
+  the words-2/3 = -1 flag marks every moving thing drawn,
+  tarps and debris and riders included, and their jittering
+  "chests" were what the wobble chased. An owner is now
+  taken only when it is built like a body: word 5 exactly
+  1.0 and words 0/2 a unit pair (the yaw rotation every
+  traced actor carries), at least two mesh parts of it in
+  the list, and its four points clustered within 0.25-3 m
+  of their mean.
+- The ring's signature -- a steady amplitude at full-error
+  writes -- says the velocity lands on the camera twice a
+  frame, so the full error overshoots into a self-sustaining
+  wobble. The lock now writes half the error: what lands
+  twice closes exactly, and the clamp still caps a hard
+  snap at 0.45 rad/frame of written velocity. The trace's
+  own line now names the camera and the target's world
+  point, so the next capture says what it aimed at, not
+  just which index won.

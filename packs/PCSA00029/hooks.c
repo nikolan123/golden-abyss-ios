@@ -672,8 +672,13 @@ void recomp_hook_uc_items_reset(Cpu *c) {
 	/* the lock-on's table, rebuilt at every reset while the pack has it on: the frame's
 	 * moving actors, one entry per owner -- words 2/3 = -1 mark an item as a moving
 	 * actor's, several items share one owner, and the player's items own the controller's
-	 * own arena (within +0x1000 of uc_pc; Step 58/59's captures). The aim point is the
-	 * mean of the owner's four points, the chest; anything not finite is dropped. */
+	 * own arena (within +0x1000 of uc_pc; Step 58/59's captures). The first device round
+	 * showed the flag alone is not a target list: tarps and debris and effect riders come
+	 * through it too (the table filled its 24 slots in a six-man fight), so an owner is
+	 * taken only when it is built like a body: word 5 exactly 1.0 and words 0/2 a unit
+	 * pair (the yaw rotation every traced actor carries), at least two mesh parts of it
+	 * in the list, and its four points (words 12/16/20/24) finite and clustered within
+	 * 0.25-3 m of their mean -- the chest the crosshair takes. */
 	{
 		static int on = -1;
 		if (on < 0) { const char *e = getenv("RECOMP_UC_SNAP"); on = !(e && *e == '0'); }
@@ -681,15 +686,21 @@ void recomp_hook_uc_items_reset(Cpu *c) {
 		if (on) {
 			uint32_t r = c->r[0], list = RD32(r + 0xeb0), cnt = RD32(r + 0xeac);
 			if (cnt > uc_item_cap) cnt = uc_item_cap;
-			uint32_t seen[24];
-			for (uint32_t i = 0; i < cnt && n < 24; i++) {
+			uint32_t seen[24]; uint32_t hits[24] = {0};
+			for (uint32_t i = 0; i < cnt; i++) {
 				uint32_t it = RD32(list + 4 * i);
 				if (!it || RD32(it + 8) != 0xffffffffu) continue;
 				uint32_t own = RD32(it + 40);
 				if (!own || (uc_pc && own >= uc_pc - 0x400 && own <= uc_pc + 0x1000)) continue;
 				uint32_t j = 0;
 				while (j < n && seen[j] != own) j++;
-				if (j < n) continue;
+				if (j < n) { hits[j]++; continue; }
+				if (n >= 24) continue;
+				if (RD32(own + 0x14) != 0x3f800000u) continue;
+				float w0, w2;
+				{ uint32_t b = RD32(own); memcpy(&w0, &b, 4); b = RD32(own + 8); memcpy(&w2, &b, 4); }
+				float s = w0 * w0 + w2 * w2;
+				if (!(s > 0.9f && s < 1.1f)) continue;
 				float x = 0, y = 0, z = 0; int ok = 1;
 				for (int w = 0; w < 4; w++) {
 					uint32_t wx = RD32(own + 0x30 + 0x10 * w), wy = RD32(own + 0x34 + 0x10 * w), wz = RD32(own + 0x38 + 0x10 * w);
@@ -698,10 +709,25 @@ void recomp_hook_uc_items_reset(Cpu *c) {
 					x += fx; y += fy; z += fz;
 				}
 				if (!ok) continue;
-				seen[n] = own;
-				uc_lock_p[n][0] = x * 0.25f; uc_lock_p[n][1] = y * 0.25f; uc_lock_p[n][2] = z * 0.25f;
+				x *= 0.25f; y *= 0.25f; z *= 0.25f;
+				float rad = 0;
+				for (int w = 0; w < 4; w++) {
+					uint32_t wx = RD32(own + 0x30 + 0x10 * w), wy = RD32(own + 0x34 + 0x10 * w), wz = RD32(own + 0x38 + 0x10 * w);
+					float fx, fy, fz; memcpy(&fx, &wx, 4); memcpy(&fy, &wy, 4); memcpy(&fz, &wz, 4);
+					float dx = fx - x, dy = fy - y, dz = fz - z, d = dx * dx + dy * dy + dz * dz;
+					if (d > rad) rad = d;
+				}
+				if (!(rad > 0.0625f && rad < 9.0f)) continue;   /* 0.25-3 m of body around the chest */
+				seen[n] = own; hits[n] = 1;
+				uc_lock_p[n][0] = x; uc_lock_p[n][1] = y; uc_lock_p[n][2] = z;
 				n++;
 			}
+			uint32_t m = 0;
+			for (uint32_t j = 0; j < n; j++) if (hits[j] >= 2) {   /* one part is not a body */
+				uc_lock_p[m][0] = uc_lock_p[j][0]; uc_lock_p[m][1] = uc_lock_p[j][1]; uc_lock_p[m][2] = uc_lock_p[j][2];
+				m++;
+			}
+			n = m;
 		}
 		uc_lock_n = n;
 	}
@@ -1355,20 +1381,31 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 	 * hands over to the better bearing. */
 	float lx = 0, ly = 0;
 	{
-		static uint32_t owner;   /* the actor the lock holds: an index into uc_lock_p, plus one */
+		static uint32_t cam_key[4]; static uint32_t cam_own[4];   /* the held actor, per camera: the store runs for several */
 		const char *se = getenv("RECOMP_UC_SNAP");
 		if (!(uc_lock_n && touchpad_native_aim_held() &&
-			settings_float("snap_aim", se && *se ? (float)atof(se) : 1.0f) > 0.5f)) owner = 0;
-		else {
+			settings_float("snap_aim", se && *se ? (float)atof(se) : 1.0f) > 0.5f)) {
+			for (int i = 0; i < 4; i++) if (cam_key[i] == cam) cam_own[i] = 0;
+		} else {
 			float b[9], pos[3]; int ok = 1;
 			for (int i = 0; i < 9; i++) { uint32_t w = RD32(cam + 0x40 + 4 * (i + i / 3)); memcpy(&b[i], &w, 4); if (!(-1e6f < b[i] && b[i] < 1e6f)) ok = 0; }   /* the basis rows of the 4x4: words 0-2, 4-6, 8-10 */
 			for (int i = 0; i < 3; i++) { uint32_t w = RD32(cam + 0x70 + 4 * i); memcpy(&pos[i], &w, 4); if (!(-1e6f < pos[i] && pos[i] < 1e6f)) ok = 0; }
+			if (ok) {   /* only a real camera matrix: the store also runs for objects that keep none there */
+				float n0 = b[0]*b[0]+b[1]*b[1]+b[2]*b[2], n1 = b[3]*b[3]+b[4]*b[4]+b[5]*b[5], n2 = b[6]*b[6]+b[7]*b[7]+b[8]*b[8];
+				float d01 = b[0]*b[3]+b[1]*b[4]+b[2]*b[5], d02 = b[0]*b[6]+b[1]*b[7]+b[2]*b[8], d12 = b[3]*b[6]+b[4]*b[7]+b[5]*b[8];
+				if (!(n0 > 0.8f && n0 < 1.2f && n1 > 0.8f && n1 < 1.2f && n2 > 0.8f && n2 < 1.2f && fabsf(d01) < 0.1f && fabsf(d02) < 0.1f && fabsf(d12) < 0.1f)) ok = 0;
+			}
+			int slot = -1;
+			for (int i = 0; i < 4; i++) if (cam_key[i] == cam) slot = i;
+			if (slot < 0) { slot = (int)(cam % 4); cam_key[slot] = cam; cam_own[slot] = 0; }
+			uint32_t owner = cam_own[slot];
 			if (!ok) owner = 0;
 			else {
 				float best = 1e9f, hold = -1.0f; uint32_t pick = 0; float py_ = 0, pp_ = 0, hy_ = 0, hp_ = 0;
 				for (uint32_t t = 0; t < uc_lock_n && t < 24; t++) {
 					float dx = uc_lock_p[t][0] - pos[0], dy = uc_lock_p[t][1] - pos[1], dz = uc_lock_p[t][2] - pos[2];
-					if (dx * dx + dy * dy + dz * dz < 9.0f) continue;   /* the player: the camera rides 2.8 m from him */
+					float dist2 = dx * dx + dy * dy + dz * dz;
+					if (dist2 < 9.0f || dist2 > 3600.0f) continue;   /* the player rides 2.8 m from the lens; nothing worth locking past 60 m */
 					float X = dx * b[0] + dy * b[1] + dz * b[2];        /* along the camera's right */
 					float Y = dx * b[3] + dy * b[4] + dz * b[5];        /* along its up */
 					float Z = dx * -b[6] + dy * -b[7] + dz * -b[8];    /* along the view: minus the third row */
@@ -1380,21 +1417,25 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 				if (pick && hold >= 0.0f && hold < best * 1.6f + 0.0004f) { pick = owner; py_ = hy_; pp_ = hp_; }
 				owner = pick;
 				if (pick) {
-					lx = py_; ly = -pp_;   /* the touch path's signs: +160 turns right, +164 looks down */
+					/* half the error: the first device round rang -- the velocity lands on
+					 * the camera twice a frame, so the full error overshoots into a wobble */
+					lx = py_ * 0.5f; ly = -pp_ * 0.5f;
 					if (lx > 0.45f) lx = 0.45f;
 					if (lx < -0.45f) lx = -0.45f;
 					if (ly > 0.45f) ly = 0.45f;
 					if (ly < -0.45f) ly = -0.45f;
-					if (fabsf(lx) < 0.004f) lx = 0;   /* deadband: a locked-on target adds no jitter */
-					if (fabsf(ly) < 0.004f) ly = 0;
+					if (fabsf(lx) < 0.002f) lx = 0;   /* deadband: a locked-on target adds no jitter */
+					if (fabsf(ly) < 0.002f) ly = 0;
 					{
 						static int n; extern uint64_t display_frames(void);
-						if (getenv("RECOMP_UC_LOCK_TRACE") && n++ % 60 == 0)
-							fprintf(stderr, "uc snap: frame %llu target %u of %u yaw %.3f pit %.3f v %.3f %.3f\n",
-								(unsigned long long)display_frames(), pick - 1, uc_lock_n, py_, pp_, lx, ly);
+						if (getenv("RECOMP_UC_LOCK_TRACE") && n++ % 30 == 0)
+							fprintf(stderr, "uc snap: frame %llu cam %#x target %u of %u at (%.1f, %.1f, %.1f) yaw %.3f pit %.3f v %.3f %.3f\n",
+								(unsigned long long)display_frames(), cam, pick - 1, uc_lock_n,
+								uc_lock_p[pick - 1][0], uc_lock_p[pick - 1][1], uc_lock_p[pick - 1][2], py_, pp_, lx, ly);
 					}
 				}
 			}
+			cam_own[slot] = owner;
 		}
 	}
 	if (uc_mx == 0 && uc_my == 0 && lx == 0 && ly == 0) return;
