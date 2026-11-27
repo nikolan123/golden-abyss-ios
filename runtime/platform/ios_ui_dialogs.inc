@@ -369,7 +369,7 @@ static void nd_layout(void) {
 static void nd_build(NDRequest r) {
     nd_store_draft();
     nd_make(); [nd_card endEditing:YES];
-    cfg_picker_dismiss(); bar_up_close_all(); touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
+    cfg_picker_dismiss(); touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
     nd_kind = r.kind; nd_seq = r.seq; nd_answered = 0; nd_back = r.back; nd_ime = r.ime;
     nd_confirm_item = nil; nd_compact_input = -1;
     nd_selected = r.focus; nd_button_count = (int)r.labels.count;

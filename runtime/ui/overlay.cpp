@@ -84,12 +84,10 @@ static int phone_ui(void) {
 #if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 extern "C" int  ios_ui_chrome_active(void);
 extern "C" int  ios_ui_chrome_pad_on(void);      /* the native pad's own word: pad_draw stands down only while it draws */
-extern "C" void ios_ui_bar_open(void);           /* the native menu strip slides down (ios_ui_chrome.m's own bar) */
 extern "C" void ios_ui_chrome_toast(const char *title, const char *body, double seconds);
 #else
 static inline int  ios_ui_chrome_active(void) { return 0; }
 static inline int  ios_ui_chrome_pad_on(void) { return 0; }
-static inline void ios_ui_bar_open(void) {}
 static inline void ios_ui_chrome_toast(const char *, const char *, double) {}
 #endif
 
@@ -882,8 +880,7 @@ extern "C" int overlay_finger_nav(float x, float y) {
 	 * the shoulders live in the outer thirds, and this is not theirs. The native chrome takes it
 	 * while installed; the ImGui bar otherwise */
 	if (bar_away && y <= 14.0f && x >= io.DisplaySize.x * 0.5f - 140.0f && x <= io.DisplaySize.x * 0.5f + 140.0f) {
-		if (ios_ui_chrome_active()) ios_ui_bar_open();   /* (ios_ui_chrome.m's own strip slides) */
-		else { g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t; }
+		g_bar_want = true; g_bar_pin_until = t + PIN_S; g_bar_active_t = t;
 		return 1;
 	}
 	return 0;

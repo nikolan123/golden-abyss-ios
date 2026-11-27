@@ -825,3 +825,21 @@ chapter-menu/gameplay transitions still require phone testing.
 Artifact: `NativUncharted-test47-unsigned.ipa`, 42,313,273 bytes; SHA-256
 `e55fccb3313d5287b39bbb8323f7ba32363f3085b29d3b96c850decb935c2bd6`.
 Changes remain local and have not been pushed to GitHub.
+
+### Step 55 — test48 one Settings menu
+
+Removed the separate Quick Controls controller and its duplicate setting
+actions. The gear opens Settings directly; its home list includes Resume Game
+and Quit Game alongside the existing categories. Native iOS still has no top
+bar or top-edge menu trigger. Keyboard/controller entry uses the same Settings
+surface. See `docs/ios-ui-test48-single-settings.md`.
+
+The iOS build, native Clang analysis, native-overlay regressions and IPA checks
+pass. Validation checks the removed controller is absent from the linked binary,
+the UI object is fresh, ZIP/plist/arm64 are valid, the packaged executable matches
+the build, and the download responds with the correct HTTP length. Phone testing
+is still needed for presentation and interactions.
+
+Artifact: `NativUncharted-test48-unsigned.ipa`, 42,305,469 bytes; SHA-256
+`33aecff7811f8579bc4d34eb7ecf49a3753edf846f7863c14ee08c927e4dd952`.
+Committed locally; no GitHub push.

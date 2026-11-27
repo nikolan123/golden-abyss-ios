@@ -13,7 +13,6 @@
 /* the game's own (window.c / overlay.cpp) */
 extern int  touchpad_on(void); extern void touchpad_set_on(int on);   /* (touchpad.h has the layout structs; these two here read as actions) */
 extern void overlay_toast_titled(const char *title, const char *body, double seconds);
-extern void overlay_bar_open(void);
 extern int  overlay_is_open(void);
 extern int overlay_native_settings_wanted(void);
 extern int overlay_native_settings_page(void);
@@ -58,7 +57,7 @@ extern void settings_set_str(const char *key, const char *value);
 static UIWindow      *g_win;
 static UIView        *g_host;        /* pass-through window child above SDL's final root view */
 static UIButton     *g_eye;          /* owned by the window (installed once, never removed) */
-static UIButton     *g_menu_gear;    /* gear below the eye opens the quick menu */
+static UIButton     *g_menu_gear;    /* gear below the eye opens Settings */
 static UIView       *g_toast_host;   /* the corner the toasts stack into, owned the same way */
 static UIStackView  *g_toast_stack;  /* the toasts, newest on top, the oldest past three */
 static int           g_installed;    /* ios_ui_chrome_install ran: everything's in place */
@@ -187,7 +186,6 @@ static void eye_look(void) {
 }
 
 /* ---- the pad: UIKit's own buttons, and the picture drawn ---------------------------------- */
-static int bar_visible(void);   /* the system quick menu's state, shared by input and artwork */
 /* Native touch areas and artwork use the same completed TpVisual, in window points. */
 @interface PadBtn : UIView {
  @public
@@ -201,7 +199,6 @@ static int bar_visible(void);   /* the system quick menu's state, shared by inpu
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)ev {
 	(void)ev;
 	if (!touchpad_on() || overlay_is_open()) return NO;
-	if (bar_visible()) return NO;   /* the strip is down: its panel owns the screen, the shield takes the rest */
 	if (overlay_pad_hidden()) return NO;   /* the bar's down, a menu, a dialog (Step 34's bits): whatever made the picture stand down stands its touches down -- the tabs sit on the pills' zone, and a menu must be pressable */
 	{	/* wherever ImGui owns the point, the finger is its (a menu over the shoulders, a dialog):
 		 * fall through as though this control were not here -- the exact behaviour the tap used to have.
@@ -351,7 +348,7 @@ static void pad_paint_cg(CGContextRef c, const TpVisual *tv) {
 }
 - (void)sync {
     const TpVisual snapshot = *touchpad_visuals();
-    const BOOL show = snapshot.on && snapshot.nb > 0 && !overlay_pad_hidden() && !bar_visible();
+    const BOOL show = snapshot.on && snapshot.nb > 0 && !overlay_pad_hidden();
     self.hidden = !show;
     if (!show || !self.window) return;
     const CGSize size = self.bounds.size;
@@ -448,8 +445,6 @@ static void tap_on(UIView *view, void (^block)(void)) {
     [view addGestureRecognizer:tap]; [tap release];
 }
 
-#include "ios_ui_menu.inc"
-
 /* ---- Step 39: what was left -- the stats OSD, the pause card, the intro strip, the full menu ------- */
 /* All of it was the last ImGui drew on a phone. Each one here drives the same state via overlay.cpp's
  * handles (no new logic): the OSD's lines are the F1 overlay's own, the pause card reads the same
@@ -465,11 +460,11 @@ static void osd_tick(void) {
 	static int lastLevel = -1;
 	const int level = overlay_stats_level();
 	const double now = chrome_now();
-	if (g_osd_lbl && !g_osd_lbl.hidden && level == lastLevel && now - last < 0.25 && !bar_visible() && !overlay_is_open()) return;
+	if (g_osd_lbl && !g_osd_lbl.hidden && level == lastLevel && now - last < 0.25 && !overlay_is_open()) return;
 	last = now; lastLevel = level;
 	char lines[7][40];
 	int n = 0;
-	if (overlay_stats_level() > 0 && !bar_visible() && !overlay_is_open()) n = overlay_osd_lines(lines, 7);
+	if (overlay_stats_level() > 0 && !overlay_is_open()) n = overlay_osd_lines(lines, 7);
 	if (!g_osd_lbl) {
 		if (!n) return;
 		g_osd_lbl = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -498,7 +493,7 @@ static void osd_tick(void) {
 static UIView *g_pz_card; static UILabel *g_pz_t, *g_pz_s;
 static void pause_tick(void) {
 	if (!g_installed || !g_host) return;
-	const int show = overlay_game_paused() && !overlay_is_open() && !overlay_intro_up() && !bar_visible();
+	const int show = overlay_game_paused() && !overlay_is_open() && !overlay_intro_up();
 	if (!show) { if (g_pz_card) g_pz_card.hidden = YES; return; }
 	if (!g_pz_card) {
 		g_pz_card = [[UIView alloc] initWithFrame:CGRectZero];
@@ -541,7 +536,7 @@ static void intro_tick(void) {
     if (!g_intro_t0) g_intro_t0 = now;
     int keys[8], xs[8], ys[8];
     const int touched = window_touch_contacts(0, keys, xs, ys, 8) || window_touch_contacts(1, keys, xs, ys, 8);
-    if (touched || now - g_intro_t0 >= 12 || bar_visible()) {
+    if (touched || now - g_intro_t0 >= 12 || overlay_is_open()) {
         overlay_intro_dismiss(); g_intro_view.hidden = YES; return;
     }
     if (!g_intro_view) {
@@ -642,7 +637,7 @@ enum { R_HEAD = 0, R_SWITCH, R_SEG, R_SLIDER, R_BUTTON, R_NOTE, R_PAIR, R_TEXT }
 @public
 	NSString *title, *detail, *right, *icon;
 	NSArray *seg;
-	int kind, sel, on, integral;
+	int kind, sel, on, integral, destructive;
 	float vmin, vmax, val;
 	void (^act)(void);
 	void (^num)(double);
@@ -880,7 +875,7 @@ static void cfg_page_help(void) {
 	cfg_head("The controls");
 	cfg_note("Hold or drag the lower left for the movement stick, or the lower right for the camera stick. A quick tap still touches the game. Left-handed mode swaps the sides.");
 	cfg_note("The picture itself is the Vita's touch screen: tap and drag it as you would the real thing.");
-	cfg_note("Tap the gear below the eye for the quick menu. Settings pauses the game; choose a category, then use Settings to go back or Done to resume.");
+	cfg_note("Tap the gear below the eye to open Settings and pause the game. Choose a category, then use Settings to go back or Done to resume.");
 	cfg_head("About");
 	{
 		CfgRow *r = cfg_row(R_TEXT);
@@ -986,6 +981,7 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
     self.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
     self.accessoryType = row->icon || choiceRow ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
     if (row->kind == R_BUTTON && !row->icon) name.textColor = [UIColor systemBlueColor];
+    if (row->destructive) name.textColor = [UIColor systemRedColor];
     if (row->kind == R_SWITCH) {
         UISwitch *toggle = [[[UISwitch alloc] init] autorelease];
         toggle.on = row->on; toggle.onTintColor = [UIColor systemBlueColor]; control = toggle;
@@ -1109,6 +1105,10 @@ static void cfg_page_build(int tab) {
             CfgRow *row = cfg_button(cfg_tab_names[i], ^{ g_cfg_page = page; cfg_rebuild(); });
             row->detail = [details[i] copy]; row->icon = [symbols[i] copy];
         }
+        cfg_head("Game");
+        cfg_button("Resume Game", ^{ cfg_close(); });
+        CfgRow *quit = cfg_button("Quit Game", ^{ overlay_quit_confirm(); });
+        quit->destructive = 1;
         return;
     }
     switch (tab) {
@@ -1202,7 +1202,7 @@ static void cfg_make(void) {
 void ios_ui_settings_open(int tab) {
 	if (!g_installed) return;
 	if (![NSThread isMainThread]) { const int t = tab; dispatch_async(dispatch_get_main_queue(), ^{ ios_ui_settings_open(t); }); return; }
-	bar_up_close_all(); touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
+	touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
 	overlay_open();   /* the menu's own open state: the pause, the input routing, the audio mute */
 	if (!g_cfg_dim) cfg_make();
 	g_cfg_page = tab >= 0 && tab < 5 ? tab : -2;
@@ -1218,6 +1218,7 @@ void ios_ui_settings_open(int tab) {
 	ios_ui_haptic(0);
 	chrome_log("    chrome: settings center open (page %d)", g_cfg_page);
 }
+int ios_ui_chrome_blocks_touch(void) { return g_installed && g_cfg_visible; }
 
 /* window.c's tp_layout hands its own numbers here (the same TpVisual both pictures read): each
  * button's touch area set to its control's shape -- a pill's box, or a 1.18-radius circle -- and
@@ -1269,7 +1270,6 @@ int ios_ui_chrome_handle_event(const SDL_Event *event) {
         if (g_cfg_picker) { cfg_picker_dismiss(); return 1; }
         if (g_cfg_visible && g_cfg_page >= 0) { g_cfg_page = -2; cfg_rebuild(); return 1; }
     }
-    if (bar_visible() && event->type == SDL_EVENT_KEY_DOWN && event->key.key == SDLK_ESCAPE) { bar_up_close_all(); return 1; }
     return 0;
 }
 
@@ -1298,9 +1298,9 @@ int ios_ui_chrome_handle_event(const SDL_Event *event) {
     chrome_layout();
     if (g_eye) eye_look();
     const int reasons = overlay_pad_hidden();
-    const BOOL hideChrome = overlay_is_open() || bar_visible() || (reasons & 8);
+    const BOOL hideChrome = overlay_is_open() || (reasons & 8);
     g_eye.hidden = hideChrome; g_menu_gear.hidden = overlay_is_open() || (reasons & 8);
-    const BOOL hidePad = !touchpad_on() || reasons || bar_visible();
+    const BOOL hidePad = !touchpad_on() || reasons;
     for (int i = 0; i < 8; i++) if (g_pad_hits[i]) {
         if (hidePad && g_pad_hits[i]->down) { g_pad_hits[i]->down = 0; touchpad_native_release(10 + i); }
         g_pad_hits[i].hidden = hidePad;
@@ -1312,7 +1312,6 @@ int ios_ui_chrome_handle_event(const SDL_Event *event) {
     if (!wantsSettings) cfg_picker_dismiss();
     if (!wantsSettings && g_cfg_visible) cfg_hide();
 
-    if (overlay_is_open() && bar_visible()) bar_up_close_all();
     osd_tick(); pause_tick(); intro_tick();
     static double lastStats;
     const double now = chrome_now();
@@ -1457,23 +1456,23 @@ void ios_ui_chrome_install(void *native_window) {
 	g_eye_on = -1; eye_look();
 
 	{	/* the pull's pill: the old ImGui tab asked for a tap, and the top edge's swipe is iOS's own
-		 * (notifications). The compact gear below the eye presents a system menu */
+		 * (notifications). The gear below the eye opens the single Settings menu. */
 		g_menu_gear = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];
 		g_menu_gear.frame = CGRectMake(8, 49, 46, 32);
 		g_menu_gear.autoresizingMask = UIViewAutoresizingFlexibleRightMargin;
 		g_menu_gear.layer.cornerRadius = 12.0f;
         [g_menu_gear setImage:[glyph(@"gear", 22, 22, [UIColor whiteColor]) imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
         g_menu_gear.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-        g_menu_gear.accessibilityLabel = @"Open quick menu";
+        g_menu_gear.accessibilityLabel = @"Open Settings";
 		g_menu_gear.backgroundColor = rgba(16, 18, 24, 0.78f);   /* readable over both dark and bright scenes */
 		g_menu_gear.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.35f].CGColor;
 		g_menu_gear.layer.borderWidth = 0.5f;
 		chrome_chip(g_menu_gear, glyph(@"gear", 22, 22, [UIColor whiteColor]));
-		chrome_menu_install();
+		control_on(g_menu_gear, UIControlEventTouchUpInside, ^{ ios_ui_settings_open(-1); });
 		[g_host addSubview:g_menu_gear];
 		[g_host bringSubviewToFront:g_menu_gear];
 		[g_menu_gear release];
-		chrome_log("    chrome: pull pill made (%.0f x %.0f at (%.0f, %.0f), window %.0f x %.0f)",
+		chrome_log("    chrome: settings gear made (%.0f x %.0f at (%.0f, %.0f), window %.0f x %.0f)",
 		           g_menu_gear.frame.size.width, g_menu_gear.frame.size.height, g_menu_gear.frame.origin.x, g_menu_gear.frame.origin.y,
 		           win.bounds.size.width, win.bounds.size.height);
 	}
@@ -1519,7 +1518,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test47 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test48 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill
