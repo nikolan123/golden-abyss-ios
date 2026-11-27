@@ -169,6 +169,7 @@ static void chrome_chip(UIButton *button, UIImage *image) {
     style.baseForegroundColor = [UIColor whiteColor];
     style.baseBackgroundColor = [UIColor secondarySystemFillColor];
     button.configuration = style;
+    button.tintColor = [UIColor whiteColor];
     button.backgroundColor = [UIColor clearColor]; button.layer.borderWidth = 0;
 }
 static void eye_look(void) {
@@ -180,7 +181,8 @@ static void eye_look(void) {
 	[g_eye setImage:[img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
     g_eye.accessibilityLabel = on ? @"Hide on-screen controls" : @"Show on-screen controls";
     g_eye.accessibilityValue = on ? @"On" : @"Off";
-    g_eye.selected = on != 0;
+    g_eye.selected = NO; /* Glass must not turn this visibility toggle into an accent-filled selection. */
+    g_eye.accessibilityTraits = UIAccessibilityTraitButton | (on ? UIAccessibilityTraitSelected : 0);
 	chrome_chip(g_eye, img);
 }
 
@@ -1334,12 +1336,11 @@ static void toast_show(NSString *title, NSString *body, double seconds) {
 		[g_toast_stack removeArrangedSubview:old]; [old removeFromSuperview];
 	}
 	UIView *card = [[UIView alloc] initWithFrame:CGRectZero];
-	blur_fill(card, UIBlurEffectStyleSystemMaterialDark);
+	UIVisualEffectView *material = blur_fill(card, UIBlurEffectStyleSystemMaterialDark);
+	material.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.32];
 	card.layer.cornerRadius = 20.0f;
 	card.clipsToBounds = YES;
 	card.userInteractionEnabled = NO;
-	UIView *edge = [[UIView alloc] initWithFrame:CGRectZero];   /* compact feedback accent */
-	edge.backgroundColor = [UIColor systemBlueColor];
 	UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
 	t.text = title; t.hidden = title.length == 0;
 	t.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
@@ -1352,18 +1353,14 @@ static void toast_show(NSString *title, NSString *body, double seconds) {
 	UIStackView *in = [[UIStackView alloc] initWithFrame:CGRectZero];
 	in.axis = UILayoutConstraintAxisVertical; in.spacing = 2.0f;
 	[in addArrangedSubview:t]; [in addArrangedSubview:b];
-	[card addSubview:edge]; [card addSubview:in];
-	edge.translatesAutoresizingMaskIntoConstraints = NO; in.translatesAutoresizingMaskIntoConstraints = NO; card.translatesAutoresizingMaskIntoConstraints = NO;
-	[edge.leadingAnchor constraintEqualToAnchor:card.leadingAnchor].active = YES;
-	[edge.topAnchor constraintEqualToAnchor:card.topAnchor].active = YES;
-	[edge.bottomAnchor constraintEqualToAnchor:card.bottomAnchor].active = YES;
-	[edge.widthAnchor constraintEqualToConstant:3.0f].active = YES;
-	[in.leadingAnchor constraintEqualToAnchor:edge.trailingAnchor constant:8.0f].active = YES;
-	[in.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-10.0f].active = YES;
+	[card addSubview:in];
+	in.translatesAutoresizingMaskIntoConstraints = NO; card.translatesAutoresizingMaskIntoConstraints = NO;
+	[in.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:12.0f].active = YES;
+	[in.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12.0f].active = YES;
 	[in.topAnchor constraintEqualToAnchor:card.topAnchor constant:8.0f].active = YES;
 	[in.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-8.0f].active = YES;
 	[g_toast_stack addArrangedSubview:card];
-	[card release]; [edge release]; [in release]; [t release]; [b release];   /* the hierarchy owns them all */
+	[card release]; [in release]; [t release]; [b release];   /* the hierarchy owns them all */
 	card.alpha = 0.0f;
 	[UIView animateWithDuration:chrome_duration(0.18) animations:^{ card.alpha = 1.0f; }];
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1461,7 +1458,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	{	/* the pull's pill: the old ImGui tab asked for a tap, and the top edge's swipe is iOS's own
 		 * (notifications). The compact gear below the eye presents a system menu */
-		g_menu_gear = [[ChromeMenuButton buttonWithType:UIButtonTypeCustom] retain];
+		g_menu_gear = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];
 		g_menu_gear.frame = CGRectMake(8, 49, 46, 32);
 		g_menu_gear.autoresizingMask = UIViewAutoresizingFlexibleRightMargin;
 		g_menu_gear.layer.cornerRadius = 12.0f;
@@ -1522,7 +1519,7 @@ void ios_ui_chrome_install(void *native_window) {
 
 	g_installed = 1;
 	chrome_layout();
-	chrome_log("    chrome: test46 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
+	chrome_log("    chrome: test47 installed above SDL Metal view (%.0fx%.0f points)", win.bounds.size.width, win.bounds.size.height);
 }
 
 /* tp_layout calls this with the eye's own x (the leftmost margin) -- the eye and the shoulder pill
