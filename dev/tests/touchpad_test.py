@@ -83,6 +83,7 @@ static void ios_ui_chrome_cancel_controls(void) { native_cancels++; }
 static int ios_gyro_on;                                  /* the phone's own sensor as a source (ios_motion.m) */
 static int window_gyro_present(void) { return pad_gyro || ios_gyro_on; }
 static uint64_t display_frames(void) { return 100; }    /* hooks.c's diagnostics name it in their lines */
+static uint32_t uc_active_camera(void) { return 0x600; }   /* hooks.c's manager chain: the test's only camera is it */
 uint32_t uc_pc, uc_lock_n; float uc_lock_p[24][3];      /* hooks.c's lock-on bridge: adapters hold the slice's copies */
 static int touchpad_active(void) { for(int i=0;i<TP_FINGERS;i++) if(tp_down[i]) return 1; return 0; }
 static int game_gesture,game_twist;

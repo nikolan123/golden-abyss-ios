@@ -1143,3 +1143,29 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   copied with the rest (a skip-the-dotfiles copy would
   have silently dropped the one file that makes the slot
   exist).
+
+### Step 63 — one camera: the lock steers only the one the game looks through
+
+- The second device round read clean in the lock's own
+  numbers -- 1-4 targets of body shape (the junk filter
+  holds), chest-height points, errors that converge, and
+  the locked targets sitting dead ahead of the steered
+  camera's basis -- but the same log shows the writes
+  going to two cameras at once during one aim: the aim
+  view 0x11474e80 and the gameplay 0x1147e4f0, each with
+  its own nearest enemy (a -0.368 pull on the gameplay
+  camera mid-aim). Whatever the blend does with a camera
+  yanked somewhere random, the player sees it -- the
+  "keeps moving toward a random axis" of both rounds.
+- The fix is the manager's own answer: the chain the diag
+  has always read (DAT_81905310, mgr+0x60, then
+  **(mgr+0x5c)+8) censors out to exactly the camera in
+  use -- 0x11474e80 during aim, 0x1147e4f0 in gameplay,
+  cinematic rigs in cutscenes (both rounds' captures
+  agree). The lock now writes only when the store's camera
+  is that one; every other object the store runs for is
+  left alone.
+- The shipped save worked -- the restore line is in the
+  round's own log -- it was just the first upload's older
+  checkpoint; the pack now carries the newer files the
+  playtest sent.

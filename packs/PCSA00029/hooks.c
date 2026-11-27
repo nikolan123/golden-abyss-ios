@@ -608,6 +608,18 @@ volatile uint32_t uc_pc;               /* the player's controller, 0 before the 
 volatile uint32_t uc_lock_n;           /* this frame's visible moving actors (drawn = visible), aim points next */
 volatile float uc_lock_p[24][3];
 static volatile uint32_t uc_item_cap = 2048;
+/* The camera the game itself looks through this frame: DAT_81905310's manager chain
+ * (mgr+0x60 set, then **(mgr+0x5c)+8), the same camera FUN_81040eda answers. Step 61's
+ * capture census: during aim the chain returns 0x11474e80 -- the camera the aim lock's
+ * own writes converged on and whose basis held the locked targets dead ahead -- while
+ * the store site runs for every camera object at once (the gameplay 0x1147e4f0 and
+ * spares 0x1147e710/0x1147f7e0 in the same seconds); a lock that steered any of them
+ * yanked cameras the player was not looking through, and the blend handed the mess back. */
+static uint32_t uc_active_camera(void) {
+	uint32_t mgr = RD32(0x81905310u);
+	if (mgr && RD32(mgr + 0x60)) { uint32_t p = RD32(RD32(mgr + 0x5c)); if (p) return RD32(p + 8); }
+	return 0;
+}
 void recomp_hook_uc_items_reset(Cpu *c) {
 	uint32_t n = RD32(c->r[0] + 0xeac);
 	if (n > uc_items_peak) uc_items_peak = n;
@@ -1387,7 +1399,11 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 			settings_float("snap_aim", se && *se ? (float)atof(se) : 1.0f) > 0.5f)) {
 			for (int i = 0; i < 4; i++) if (cam_key[i] == cam) cam_own[i] = 0;
 		} else {
-			float b[9], pos[3]; int ok = 1;
+			/* only the camera the game itself looks through this frame (the manager chain,
+			 * uc_active_camera above): the store runs for every camera object, and a write
+			 * to a spare one yanked it toward its own nearest enemy and handed the mess back
+			 * when the blend returned to it */
+			float b[9], pos[3]; int ok = cam && cam == uc_active_camera();
 			for (int i = 0; i < 9; i++) { uint32_t w = RD32(cam + 0x40 + 4 * (i + i / 3)); memcpy(&b[i], &w, 4); if (!(-1e6f < b[i] && b[i] < 1e6f)) ok = 0; }   /* the basis rows of the 4x4: words 0-2, 4-6, 8-10 */
 			for (int i = 0; i < 3; i++) { uint32_t w = RD32(cam + 0x70 + 4 * i); memcpy(&pos[i], &w, 4); if (!(-1e6f < pos[i] && pos[i] < 1e6f)) ok = 0; }
 			if (ok) {   /* only a real camera matrix: the store also runs for objects that keep none there */
