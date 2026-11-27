@@ -12,9 +12,11 @@
 // The device frame is portrait-based (+x right, +y at the earpiece, +z out of the screen);
 // the game's screen frame is landscape (+x right on the screen, +y up the screen, +z out).
 // Which landscape is playing is the interface orientation, handed over by the chrome's
-// main-thread window sync:
-//   home on the left  (LandscapeLeft):  x_s = +y_d, y_s = -x_d
-//   home on the right (LandscapeRight): x_s = -y_d, y_s = +x_d
+// main-thread window sync (the UIInterfaceOrientation names are the opposites of the home
+// button's side: LandscapeLeft puts it on the right, LandscapeRight on the left -- the
+// doc's names and the device's own are each other's inverses):
+//   home on the right (LandscapeLeft):   x_s = -y_d, y_s = +x_d
+//   home on the left  (LandscapeRight):  x_s = +y_d, y_s = -x_d
 // Both are proper rotations, so the gyro turns with the same sign the phone was turned.
 
 #import <Foundation/Foundation.h>
@@ -54,8 +56,8 @@ int ios_motion_start(void) {
         if (!d || fxhold || !fxstarted) return;
         const float x = (float)d.acceleration.x, y = (float)d.acceleration.y, z = (float)d.acceleration.z;
         float a[3];
-        if (fxorient == 4) { a[0] = -y; a[1] = x; a[2] = z; }     /* LandscapeRight: home on the right */
-        else               { a[0] =  y; a[1] = -x; a[2] = z; }     /* LandscapeLeft (and anything else) */
+        if (fxorient == 3) { a[0] = -y; a[1] = x; a[2] = z; }      /* LandscapeLeft: home on the right */
+        else               { a[0] =  y; a[1] = -x; a[2] = z; }    /* LandscapeRight (and anything else) */
         float s[3] = { -9.80665f * a[0], -9.80665f * a[1], -9.80665f * a[2] };
         motion_feed_accel(s, (uint64_t)(d.timestamp * 1e9));
     }];
@@ -63,7 +65,7 @@ int ios_motion_start(void) {
         if (!d || fxhold || !fxstarted) return;
         const float x = (float)d.rotationRate.x, y = (float)d.rotationRate.y, z = (float)d.rotationRate.z;
         float g[3];
-        if (fxorient == 4) { g[0] = -y; g[1] = x; g[2] = z; }
+        if (fxorient == 3) { g[0] = -y; g[1] = x; g[2] = z; }
         else               { g[0] =  y; g[1] = -x; g[2] = z; }
         motion_feed_gyro(g, (uint64_t)(d.timestamp * 1e9));
     }];

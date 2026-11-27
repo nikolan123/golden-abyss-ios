@@ -911,3 +911,13 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   and returns it on disconnect. The regression suite gains the
   tilt gate: a gyro source, whichever it is, keeps the left stick
   the game's in a tilt section.
+
+### Step 53 — the tilt's direction, corrected on the device's word
+
+- The first CoreMotion build read the tilt mirrored: a 180-degree
+  error about the screen's axis, the interface-orientation table
+  written to the doc's names instead of the home button's side
+  (UIInterfaceOrientationLandscapeLeft is home on the RIGHT; the
+  device's own orientation names are each other's inverses). The
+  two rows swap, and both the accelerometer and the gyroscope
+  rotate consistently again.
