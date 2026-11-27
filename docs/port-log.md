@@ -1169,3 +1169,42 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   round's own log -- it was just the first upload's older
   checkpoint; the pack now carries the newer files the
   playtest sent.
+
+### Step 64 — the channel the aim camera actually listens to, and the slot param made visible
+
+- The third capture measured the aim camera's response
+  directly: full-rate velocity writes (-0.13 rad/frame, 7.5
+  degrees a frame) moved its basis eleven degrees in a
+  second. The aim camera -- the zoomed one, fov 0.47
+  against the gameplay 0.96 -- damps the +0x160 channel
+  forty-fold. That was the whole story of "hold L: nothing
+  happens": the lock's writes were absorbed, while the
+  spare cameras the store also runs for (where +0x160 does
+  integrate) were yanked toward their own targets and
+  handed the randomness back on the blend; the visible
+  slow drift was the aim camera's damped crawl.
+- The lock now rides the one channel verified to steer the
+  aim view: the pad's look stick, the same deflection a
+  thumb's drag writes (the two-thumb shooting round proved
+  it turns while aiming). uc_mouse_look's rest branch (no
+  touch deltas this frame) deflection-nudges the stick
+  toward the nearest visible enemy's chest -- full stick
+  while the bearing is past a 0.06 rad deadband (the game
+  turns ~0.075 rad a frame at full deflection, so the band
+  is one frame's turn wide), nothing within it. The
+  camera is the manager's active one and only when its fov
+  says aim (0.2-0.75: the chain flickers to the gameplay
+  camera mid-aim, and that basis must not steer). A drag
+  still owns the stick while deltas flow; the lock takes
+  it back whenever the finger rests. The +0x160 lock is
+  gone entirely; the touch path and the magnet keep theirs.
+- The shipped save restored again (the line is in the log)
+  and the game still ignored it -- the blank slot param is
+  the suspect. The shipped .slot1 now carries a real one
+  (status: exists, the game's own title, its size, a
+  stamped time), and if the game wants more than that, the
+  bootstrap now also copies fs/savedata0/.slot1 out to
+  Documents/Nativ/slot1-param.bin at every boot: the game
+  writes the real param itself once it saves, and the
+  Files app can finally see it. One round with that file
+  attached ends the guessing.

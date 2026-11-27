@@ -1008,6 +1008,24 @@ static void ios_bootstrap(int *argc, char ***argv) {
 			}
 		}
 	}
+	{   /* the slot's own param exported where the Files app shows it: the game writes
+	     * .slot1 itself once it saves, a dotfile the picker never lists -- a shipped
+	     * save the game refuses may need the real param, and this is how it comes out */
+		char s0[PATH_MAX], d0[PATH_MAX];
+		snprintf(s0, sizeof s0, "%s/savedata0/.slot1", fs);
+		snprintf(d0, sizeof d0, "%sslot1-param.bin", work);
+		FILE *in = fopen(s0, "rb");
+		if (in) {
+			FILE *out = fopen(d0, "wb");
+			if (out) {
+				char buf[4096]; size_t r;
+				while ((r = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, r, out);
+				fclose(out);
+				fprintf(stderr, "ios: the slot param exported to %s\n", d0);
+			}
+			fclose(in);
+		}
+	}
 
 	char app0[PATH_MAX] = "";
 	{   /* 1: <fs>/app0, the player's own copy */

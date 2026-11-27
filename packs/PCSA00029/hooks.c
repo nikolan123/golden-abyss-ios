@@ -1317,6 +1317,69 @@ static void uc_camera_diag(void) {
 }
 static float uc_mx, uc_my; static int uc_age;   /* pending radians; discarded if no camera consumes them within a few frames */
 static float uc_nx, uc_ny;   /* the nudge's direction (one axis, unit) as last written -- its own small turn subtracts before the magnet */
+/* The Uncharted 4-style lock itself: while aim is held, the pad's look stick is deflected
+ * toward the nearest visible enemy's chest, the same channel a thumb's drag rides. The
+ * first two device rounds steered the camera's look velocity instead (+0x160), and the
+ * third capture showed why that never lands while aiming: the aim camera (the zoomed one,
+ * fov 0.47 against the gameplay 0.96) damps that channel forty-fold -- full-rate writes
+ * moved its basis eleven degrees in a second -- so a hold did nothing visibly, and the
+ * spare cameras the store also runs for (where +0x160 does integrate) got yanked toward
+ * their own targets and handed the mess back on the blend. The stick path is what the
+ * verified touch look already uses while aiming, so it turns at the game's own aim speed.
+ * The active camera must be the aim one (its fov says): its basis (+0x40, the view along
+ * minus the third row) and position (+0x70) give the target's bearing; the nearest within
+ * 3-60 m and ahead of the lens wins, the held actor keeps the lock within half again of
+ * the best bearing, and the deflection stops inside a 0.06 rad deadband -- the game turns
+ * ~0.075 rad a frame at full deflection, so the band is just wider than one frame's turn.
+ * The touch's own drag still owns the stick while deltas flow; the lock takes it back
+ * whenever the finger rests. "snap_aim" (Controls) is the toggle, RECOMP_UC_SNAP the
+ * pack's default. */
+static void uc_lock_nudge(uint32_t pad) {
+	static uint32_t owner;   /* the actor the lock holds: an index into uc_lock_p, plus one */
+	const char *se = getenv("RECOMP_UC_SNAP");
+	if (!(uc_lock_n && pad && touchpad_native_aim_held() &&
+		settings_float("snap_aim", se && *se ? (float)atof(se) : 1.0f) > 0.5f)) { owner = 0; return; }
+	uint32_t cam = uc_active_camera();
+	if (!cam) { owner = 0; return; }
+	{   /* the zoomed aim view: the manager's chain flickers to the gameplay camera mid-aim,
+	     * and that one's basis must not steer the stick */
+		uint32_t wb = RD32(cam + 0xc0); float fov; memcpy(&fov, &wb, 4);
+		if (!(fov > 0.2f && fov < 0.75f)) { owner = 0; return; }
+	}
+	float b[9], pos[3]; int ok = 1;
+	for (int i = 0; i < 9; i++) { uint32_t w = RD32(cam + 0x40 + 4 * (i + i / 3)); memcpy(&b[i], &w, 4); if (!(-1e6f < b[i] && b[i] < 1e6f)) ok = 0; }   /* the basis rows of the 4x4: words 0-2, 4-6, 8-10 */
+	for (int i = 0; i < 3; i++) { uint32_t w = RD32(cam + 0x70 + 4 * i); memcpy(&pos[i], &w, 4); if (!(-1e6f < pos[i] && pos[i] < 1e6f)) ok = 0; }
+	if (!ok) { owner = 0; return; }
+	float best = 1e9f, hold = -1.0f; uint32_t pick = 0; float py_ = 0, pp_ = 0, hy_ = 0, hp_ = 0;
+	for (uint32_t t = 0; t < uc_lock_n && t < 24; t++) {
+		float dx = uc_lock_p[t][0] - pos[0], dy = uc_lock_p[t][1] - pos[1], dz = uc_lock_p[t][2] - pos[2];
+		float dist2 = dx * dx + dy * dy + dz * dz;
+		if (dist2 < 9.0f || dist2 > 3600.0f) continue;   /* the player rides 2.8 m from the lens; nothing worth locking past 60 m */
+		float X = dx * b[0] + dy * b[1] + dz * b[2];        /* along the camera's right */
+		float Y = dx * b[3] + dy * b[4] + dz * b[5];        /* along its up */
+		float Z = dx * -b[6] + dy * -b[7] + dz * -b[8];    /* along the view: minus the third row */
+		if (Z <= 0) continue;                               /* behind the lens */
+		float yaw = atan2f(X, Z), pit = atan2f(Y, Z), ang = yaw * yaw + pit * pit;
+		if (ang < best) { best = ang; pick = t + 1; py_ = yaw; pp_ = pit; }
+		if (t + 1 == owner) { hold = ang; hy_ = yaw; hp_ = pit; }
+	}
+	if (pick && hold >= 0.0f && hold < best * 1.6f + 0.0004f) { pick = owner; py_ = hy_; pp_ = hp_; }
+	owner = pick;
+	if (!pick) return;
+	if (fabsf(py_) < 0.06f && fabsf(pp_) < 0.06f) return;   /* on the chest: the stick rests */
+	float x, y;
+	{ uint32_t wx = RD32(pad + 0x354), wy = RD32(pad + 0x358); memcpy(&x, &wx, 4); memcpy(&y, &wy, 4); }
+	if (fabsf(py_) >= 0.06f) x = py_ > 0 ? 0.6f : -0.6f;   /* the same deflection a rightward drag writes */
+	if (fabsf(pp_) >= 0.06f) y = pp_ > 0 ? -0.6f : 0.6f;  /* a target above looks up, the drag-down sign */
+	{ uint32_t wx, wy; memcpy(&wx, &x, 4); memcpy(&wy, &y, 4); WR32(pad + 0x354, wx); WR32(pad + 0x358, wy); }
+	{
+		static int n; extern uint64_t display_frames(void);
+		if (getenv("RECOMP_UC_LOCK_TRACE") && n++ % 30 == 0)
+			fprintf(stderr, "uc snap: frame %llu cam %#x target %u of %u at (%.1f, %.1f, %.1f) yaw %.3f pit %.3f stick %.2f %.2f\n",
+				(unsigned long long)display_frames(), cam, pick - 1, uc_lock_n,
+				uc_lock_p[pick - 1][0], uc_lock_p[pick - 1][1], uc_lock_p[pick - 1][2], py_, pp_, x, y);
+	}
+}
 void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
 	(void)reg;
 	static int diag = -1; if (diag < 0) diag = getenv("RECOMP_YAW_DIAG") != 0;
@@ -1331,7 +1394,7 @@ void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
 		dx += mx * k;
 		dy += my * k * (window_mouse_invert() ? -1.0f : 1.0f);
 	}
-	if (dx == 0 && dy == 0) return;
+	if (dx == 0 && dy == 0) { uc_lock_nudge(c->r[6]); return; }   /* the lock owns the stick whenever the finger rests */
 	uint32_t pad = c->r[6];
 	if (!pad) return;
 	/* the camera's turn: its look message (built from this stick by the action layer, which keeps only the
@@ -1378,90 +1441,14 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 			}
 		}
 	}
-	if (uc_mx == 0 && uc_my == 0 && !uc_lock_n) return;
-	/* the Uncharted 4-style lock: while a thumb holds aim, the nearest visible actor's
-	 * chest takes the camera. The render reset leaves the frame's actors (drawn =
-	 * visible, the player excluded there), the camera's own basis (+0x40: its rows are
-	 * right, up and the view's opposite, Step 59 measured the view along minus the
-	 * third) and position (+0x70) turn a chest into an exact error angle, and that
-	 * angle is the frame's look velocity -- a hard pull onto the target, then tracking,
-	 * with a deadband so a centered target sits still. The chosen actor keeps the lock
-	 * while it stays visible within half again of the best bearing, so two enemies at
-	 * similar angles do not trade it; a dead one drops out of the list and the lock
-	 * moves on. The toggle is "snap_aim" (Controls), the pack's RECOMP_UC_SNAP its
-	 * default; the touch's own deltas still add, so a drag can break out and the lock
-	 * hands over to the better bearing. */
-	float lx = 0, ly = 0;
-	{
-		static uint32_t cam_key[4]; static uint32_t cam_own[4];   /* the held actor, per camera: the store runs for several */
-		const char *se = getenv("RECOMP_UC_SNAP");
-		if (!(uc_lock_n && touchpad_native_aim_held() &&
-			settings_float("snap_aim", se && *se ? (float)atof(se) : 1.0f) > 0.5f)) {
-			for (int i = 0; i < 4; i++) if (cam_key[i] == cam) cam_own[i] = 0;
-		} else {
-			/* only the camera the game itself looks through this frame (the manager chain,
-			 * uc_active_camera above): the store runs for every camera object, and a write
-			 * to a spare one yanked it toward its own nearest enemy and handed the mess back
-			 * when the blend returned to it */
-			float b[9], pos[3]; int ok = cam && cam == uc_active_camera();
-			for (int i = 0; i < 9; i++) { uint32_t w = RD32(cam + 0x40 + 4 * (i + i / 3)); memcpy(&b[i], &w, 4); if (!(-1e6f < b[i] && b[i] < 1e6f)) ok = 0; }   /* the basis rows of the 4x4: words 0-2, 4-6, 8-10 */
-			for (int i = 0; i < 3; i++) { uint32_t w = RD32(cam + 0x70 + 4 * i); memcpy(&pos[i], &w, 4); if (!(-1e6f < pos[i] && pos[i] < 1e6f)) ok = 0; }
-			if (ok) {   /* only a real camera matrix: the store also runs for objects that keep none there */
-				float n0 = b[0]*b[0]+b[1]*b[1]+b[2]*b[2], n1 = b[3]*b[3]+b[4]*b[4]+b[5]*b[5], n2 = b[6]*b[6]+b[7]*b[7]+b[8]*b[8];
-				float d01 = b[0]*b[3]+b[1]*b[4]+b[2]*b[5], d02 = b[0]*b[6]+b[1]*b[7]+b[2]*b[8], d12 = b[3]*b[6]+b[4]*b[7]+b[5]*b[8];
-				if (!(n0 > 0.8f && n0 < 1.2f && n1 > 0.8f && n1 < 1.2f && n2 > 0.8f && n2 < 1.2f && fabsf(d01) < 0.1f && fabsf(d02) < 0.1f && fabsf(d12) < 0.1f)) ok = 0;
-			}
-			int slot = -1;
-			for (int i = 0; i < 4; i++) if (cam_key[i] == cam) slot = i;
-			if (slot < 0) { slot = (int)(cam % 4); cam_key[slot] = cam; cam_own[slot] = 0; }
-			uint32_t owner = cam_own[slot];
-			if (!ok) owner = 0;
-			else {
-				float best = 1e9f, hold = -1.0f; uint32_t pick = 0; float py_ = 0, pp_ = 0, hy_ = 0, hp_ = 0;
-				for (uint32_t t = 0; t < uc_lock_n && t < 24; t++) {
-					float dx = uc_lock_p[t][0] - pos[0], dy = uc_lock_p[t][1] - pos[1], dz = uc_lock_p[t][2] - pos[2];
-					float dist2 = dx * dx + dy * dy + dz * dz;
-					if (dist2 < 9.0f || dist2 > 3600.0f) continue;   /* the player rides 2.8 m from the lens; nothing worth locking past 60 m */
-					float X = dx * b[0] + dy * b[1] + dz * b[2];        /* along the camera's right */
-					float Y = dx * b[3] + dy * b[4] + dz * b[5];        /* along its up */
-					float Z = dx * -b[6] + dy * -b[7] + dz * -b[8];    /* along the view: minus the third row */
-					if (Z <= 0) continue;                               /* behind the lens */
-					float yaw = atan2f(X, Z), pit = atan2f(Y, Z), ang = yaw * yaw + pit * pit;
-					if (ang < best) { best = ang; pick = t + 1; py_ = yaw; pp_ = pit; }
-					if (t + 1 == owner) { hold = ang; hy_ = yaw; hp_ = pit; }
-				}
-				if (pick && hold >= 0.0f && hold < best * 1.6f + 0.0004f) { pick = owner; py_ = hy_; pp_ = hp_; }
-				owner = pick;
-				if (pick) {
-					/* half the error: the first device round rang -- the velocity lands on
-					 * the camera twice a frame, so the full error overshoots into a wobble */
-					lx = py_ * 0.5f; ly = -pp_ * 0.5f;
-					if (lx > 0.45f) lx = 0.45f;
-					if (lx < -0.45f) lx = -0.45f;
-					if (ly > 0.45f) ly = 0.45f;
-					if (ly < -0.45f) ly = -0.45f;
-					if (fabsf(lx) < 0.002f) lx = 0;   /* deadband: a locked-on target adds no jitter */
-					if (fabsf(ly) < 0.002f) ly = 0;
-					{
-						static int n; extern uint64_t display_frames(void);
-						if (getenv("RECOMP_UC_LOCK_TRACE") && n++ % 30 == 0)
-							fprintf(stderr, "uc snap: frame %llu cam %#x target %u of %u at (%.1f, %.1f, %.1f) yaw %.3f pit %.3f v %.3f %.3f\n",
-								(unsigned long long)display_frames(), cam, pick - 1, uc_lock_n,
-								uc_lock_p[pick - 1][0], uc_lock_p[pick - 1][1], uc_lock_p[pick - 1][2], py_, pp_, lx, ly);
-					}
-				}
-			}
-			cam_own[slot] = owner;
-		}
-	}
-	if (uc_mx == 0 && uc_my == 0 && lx == 0 && ly == 0) return;
+	if (uc_mx == 0 && uc_my == 0) return;
 	/* the magnet: the assist's own component (the game's turn minus the nudge's residue, a
 	 * fixed ~0.002 rad/frame along the drag) scales by the strength and adds to the exact
 	 * touch deltas -- the pull toward the target at what a thumb can feel. Lowpassed, so a
 	 * pull that flips sign at the target's centre eases over it instead of jittering, and
 	 * clamped, so a scripted turn never becomes a lurch. */
 	static float mag_x, mag_y;
-	float vx = uc_mx + lx, vy = uc_my + ly;
+	float vx = uc_mx, vy = uc_my;
 	const float k = uc_aim_magnet();
 	if (k > 0) {
 		float gx = px - uc_nx * 0.002f, gy = py - uc_ny * 0.002f;

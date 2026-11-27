@@ -360,55 +360,68 @@ static void camera_hook(void) {
     puts("PASS: production Uncharted touch-to-camera hooks preserve exact yaw/pitch and retain desktop mouse scaling/invert");
 }
 static void snap_aim_lock(void) {
-    /* the lock-on: with aim held, the nearest visible actor's chest takes the camera --
-     * the bearing is exact in the camera's own basis, a centered target adds nothing, the
-     * held actor keeps the lock only within hysteresis, the player's own arena never
-     * does, letting go stops it, and the toggle and the pack's env kill-switch are honoured */
+    /* the lock-on: with aim held, the pad's look stick deflects toward the nearest visible
+     * enemy -- through the aim camera's own basis, within the deadband the stick rests, the
+     * held actor keeps the lock only inside hysteresis, the player's own arena and anything
+     * behind the lens never count, letting go stops it, and the toggle, the pack's
+     * kill-switch and the zoomed-aim-camera gate are all honoured */
     touchpad_cancel_all(); memset(guest, 0, sizeof guest);
     tp_bits &= ~LTRIG; tp_aim_latched = 0; uc_pc = 0; uc_lock_n = 0;
-    Cpu c = {0}; c.r[0] = 0x600;                       /* the camera: basis at +0x40, position at +0x70, look at +0x160 */
-    WR32(0x640, 0x3f800000);                           /* right = (1,0,0) */
-    WR32(0x654, 0x3f800000);                           /* up = (0,1,0) */
-    WR32(0x668, 0x3f800000);                           /* back = (0,0,1): the view is along -z */
-    WR32(0x67c, 0x3f800000);                           /* the matrix's w */
-    uc_lock_n = 2;                                    /* two visible actors: one dead ahead, one 45 degrees right */
+    Cpu c = {0}; c.r[0] = 0x600; c.r[6] = 0x100;      /* the camera and the pad */
+    WR32(0x640, 0x3f800000);                          /* right = (1,0,0) */
+    WR32(0x654, 0x3f800000);                          /* up = (0,1,0) */
+    WR32(0x668, 0x3f800000);                          /* back = (0,0,1): the view is along -z */
+    WR32(0x67c, 0x3f800000);                          /* the matrix's w */
+    WR32(0x6c0, 0x3f000000);                          /* the zoomed aim view: fov 0.5 */
+    uc_lock_n = 2;                                    /* one enemy 45 degrees right, one dead ahead */
     uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = -10.0f;
     uc_lock_p[1][0] = 0.0f;  uc_lock_p[1][2] = -5.0f;
     tp_bits |= LTRIG;                                 /* aim held */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    assert(!RD32(0x760) && !RD32(0x764));             /* the nearer bearing is dead ahead: nothing to add */
+    recomp_ihook_uc_mouse_look(&c, 0);
+    assert(!RD32(0x454) && !RD32(0x458));             /* the nearer bearing is dead ahead: within the deadband the stick rests */
     uc_lock_n = 1;                                    /* the ahead one dies; the 45-degree one is what's left */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    close_to(guest_float(0x760), atanf(1.0f)*0.5f); assert(!RD32(0x764));   /* a hard pull: half the error lands once, the frame takes it twice */
-    WR32(0x760, 0); WR32(0x764, 0);
-    uc_lock_n = 2; uc_lock_p[1][0] = 1.0f; uc_lock_p[1][2] = -5.0f;   /* a fresh actor appears at a better bearing */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    close_to(guest_float(0x760), atanf(1.0f/5.0f)*0.5f);    /* the held 45-degree one is far outside hysteresis: the lock hands over */
-    WR32(0x760, 0); WR32(0x764, 0);
-    uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = -10.0f; uc_lock_n = 1;   /* the 45-degree one alone again */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    close_to(guest_float(0x760), atanf(1.0f)*0.5f);
-    WR32(0x760, 0); WR32(0x764, 0);
+    recomp_ihook_uc_mouse_look(&c, 0);
+    close_to(guest_float(0x454), 0.6f); assert(!RD32(0x458));   /* a full rightward deflection */
+    WR32(0x454, 0); WR32(0x458, 0);
+    uc_lock_p[0][1] = 5.0f;                            /* the target rises above the crosshair */
+    recomp_ihook_uc_mouse_look(&c, 0);
+    close_to(guest_float(0x454), 0.6f); close_to(guest_float(0x458), -0.6f);   /* pitch joins, upward */
+    WR32(0x454, 0); WR32(0x458, 0);
+    uc_lock_p[0][0] = -10.0f; uc_lock_p[0][1] = 0.0f;  /* 45 degrees left */
+    recomp_ihook_uc_mouse_look(&c, 0);
+    close_to(guest_float(0x454), -0.6f);
+    WR32(0x454, 0); WR32(0x458, 0);
+    uc_lock_n = 2; uc_lock_p[1][0] = 1.0f; uc_lock_p[1][2] = -5.0f;   /* a fresh enemy at a better bearing, right */
+    recomp_ihook_uc_mouse_look(&c, 0);
+    close_to(guest_float(0x454), 0.6f);                /* the held 45-degree one is far outside hysteresis: the lock hands over, across the axis */
+    WR32(0x454, 0); WR32(0x458, 0);
+    uc_lock_p[0][0] = 10.0f; uc_lock_n = 1;            /* the right one alone again */
+    recomp_ihook_uc_mouse_look(&c, 0);
+    close_to(guest_float(0x454), 0.6f);
+    WR32(0x454, 0); WR32(0x458, 0);
     uc_lock_p[0][0] = 0.0f; uc_lock_p[0][2] = -2.0f;   /* within 3 m of the lens: the player, never a target */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    assert(!RD32(0x760) && !RD32(0x764));
+    recomp_ihook_uc_mouse_look(&c, 0);
+    assert(!RD32(0x454) && !RD32(0x458));
     uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = 10.0f;  /* behind the lens: invisible to the lock */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    assert(!RD32(0x760) && !RD32(0x764));
+    recomp_ihook_uc_mouse_look(&c, 0);
+    assert(!RD32(0x454) && !RD32(0x458));
     uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = -10.0f;
     tp_bits &= ~LTRIG; tp_aim_latched = 0;             /* aim let go: the lock releases */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    assert(!RD32(0x760) && !RD32(0x764));
+    recomp_ihook_uc_mouse_look(&c, 0);
+    assert(!RD32(0x454) && !RD32(0x458));
     tp_bits |= LTRIG;
-    recomp_ihook_uc_look_velocity(&c, 0);              /* it takes the target again when aim returns */
-    close_to(guest_float(0x760), atanf(1.0f)*0.5f);
-    WR32(0x760, 0); WR32(0x764, 0);
+    recomp_ihook_uc_mouse_look(&c, 0);                 /* it takes the target again when aim returns */
+    close_to(guest_float(0x454), 0.6f);
+    WR32(0x454, 0); WR32(0x458, 0);
     setenv("RECOMP_UC_SNAP", "0", 1);                  /* the pack's kill-switch: off */
-    recomp_ihook_uc_look_velocity(&c, 0);
-    assert(!RD32(0x760) && !RD32(0x764));
+    recomp_ihook_uc_mouse_look(&c, 0);
+    assert(!RD32(0x454) && !RD32(0x458));
     setenv("RECOMP_UC_SNAP", "1", 1);
+    WR32(0x6c0, 0x3f7fffff);                          /* the unzoomed gameplay camera: no nudge from its basis */
+    recomp_ihook_uc_mouse_look(&c, 0);
+    assert(!RD32(0x454) && !RD32(0x458));
     tp_bits &= ~LTRIG; tp_aim_latched = 0; uc_lock_n = 0;
-    puts("PASS: snap aim holds the nearest visible enemy, hands over inside hysteresis, never takes the player, and lets go with the aim");
+    puts("PASS: snap aim deflects the look stick at the nearest visible enemy through the aim camera's own basis");
 }
 static void game_menu_routing(void) {
     touchpad_cancel_all(); setenv("RECOMP_TOUCH_GAMEPLAY_GATE","1",1);
