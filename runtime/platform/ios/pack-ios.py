@@ -18,6 +18,7 @@ Paths: <root> is this checkout (three levels up), <out> is $ATIV_IPA_OUT or <roo
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,9 @@ DATA = os.path.join(APP, "data")
 ICONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "AppIcon")
 
 BUNDLE_ID = "net.nikolan.goldenabyss" + (".smoke" if SMOKE else "")
+if NAME != "GoldenAbyss" + ("-smoke" if SMOKE else ""):
+    # a test build (--app-name) gets its own identifier, so it installs beside the real app instead of replacing it
+    BUNDLE_ID += "." + re.sub(r"[^a-z0-9]+", "-", NAME.lower()).strip("-")
 DISPLAY_NAME = "Golden Abyss"
 EXE = "game_host"
 

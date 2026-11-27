@@ -13,7 +13,8 @@ FEATURES says what the pack gives the game beyond playing it, each feature verif
 below). --check holds each against the settings that make it (widescreen needs RECOMP_ASPECT_HOOK, and so on), so the
 list can't claim what the pack doesn't do or leave out what it does; --table makes the README's games table from it.
 `packconf.py --check` reads every pack, version by version, with and without each switch, and checks its shape;
-`packconf.py --table [--check|--write] <README.md>` prints, checks or rewrites the README's games table;
+`packconf.py --table [--check|--write] <README.md>` prints, checks or rewrites the README's games table (a README
+with no table markers has none to check, and --check passes);
 `packconf.py <pack.toml> [version]` prints the settings, NAME=value a line.
 """
 import os
@@ -179,7 +180,7 @@ def table():
 def _table_in(readme):
     text = open(readme, encoding="utf-8").read()
     a, b = text.find(TABLE_START), text.find(TABLE_END)
-    if a < 0 or b < a: raise PackError(f"{readme}: no games table markers ({TABLE_START} ... {TABLE_END})")
+    if a < 0 or b < a: return None   # (a fork's README need not carry a table: then there is nothing to keep in step)
     return text, a + len(TABLE_START), b
 
 
@@ -188,7 +189,11 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--table"]:
         t = table()
         if len(sys.argv) == 4 and sys.argv[2] in ("--check", "--write"):
-            text, a, b = _table_in(sys.argv[3]); new = text[:a] + "\n" + t + "\n" + text[b:]
+            found = _table_in(sys.argv[3])
+            if found is None:
+                if sys.argv[2] == "--write": sys.exit(f"{sys.argv[3]}: no games table markers to write between")
+                print(f"ok     {sys.argv[3]} has no games table"); sys.exit(0)
+            text, a, b = found; new = text[:a] + "\n" + t + "\n" + text[b:]
             if sys.argv[2] == "--write": open(sys.argv[3], "w", encoding="utf-8").write(new); print(f"wrote the games table into {sys.argv[3]}")
             elif new != text: print(f"{sys.argv[3]}: the games table is out of date: pipeline/packconf.py --table --write {sys.argv[3]}"); sys.exit(1)
             else: print(f"ok     {sys.argv[3]}'s games table matches the packs")

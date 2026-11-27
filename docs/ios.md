@@ -115,7 +115,7 @@ icon set, the runtime images and the game's own files, zipped with the permissio
 |---|---|
 | `pack-ios.py PCSA00029` | the full ipa, game data included (a few GB) |
 | `pack-ios.py PCSA00029 --smoke` | the runtime alone (~40 MB): boots, logs what it is missing, reuses an installed build's data |
-| `pack-ios.py PCSA00029 --app-name X` | a different bundle name for a test build |
+| `pack-ios.py PCSA00029 --app-name X` | a different bundle name, and its own identifier, so a test build installs beside the real app |
 | `pack-ios.py PCSA00029 --icon <png>` | a different app icon |
 
 `ATIV_IPA_OUT` puts the ipa somewhere other than `dist\`.
