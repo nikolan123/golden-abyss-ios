@@ -22,10 +22,13 @@ static UITextField *nd_field;
 static UILabel *nd_count, *nd_remember_label, *nd_corner_label;
 static UITableView *nd_table;
 static UIStackView *nd_actions;
+static UIScrollView *nd_action_scroll;
 static UIProgressView *nd_progress, *nd_corner_progress;
 static UIActivityIndicatorView *nd_spinner;
 static UISwitch *nd_remember;
 static UIButton *nd_buttons[3];
+static UIBarButtonItem *nd_confirm_item;
+static int nd_compact_input = -1;
 static NSData *nd_rows;
 static NSString *nd_draft;
 static int nd_draft_seq = -1;
@@ -76,10 +79,13 @@ static BOOL nd_valid_text(NSString *text) {
 }
 static NSString *nd_current_text(void) { return nd_ime.multiline ? nd_text.text : nd_field.text; }
 static void nd_count_update(void) {
+    if (nd_kind != ND_IME) return;
     nd_count.text = [NSString stringWithFormat:@"%lu / %u", (unsigned long)nd_current_text().length, nd_ime.maxlen];
     const BOOL valid = nd_valid_text(nd_current_text());
     nd_count.textColor = valid ? [UIColor secondaryLabelColor] : [UIColor systemRedColor];
-    nd_buttons[0].enabled = valid;
+    const BOOL canSubmit = valid && !(nd_ime.multiline ? nd_text.markedTextRange : nd_field.markedTextRange);
+    nd_buttons[0].enabled = canSubmit;
+    nd_confirm_item.enabled = canSubmit;
 }
 static void nd_store_draft(void) {
     if (nd_kind != ND_IME || nd_answered) return;
@@ -240,18 +246,37 @@ static void nd_make(void) {
     nd_remember_label = [[UILabel alloc] init]; nd_remember_label.text = @"Remember this choice"; nd_remember_label.font = [UIFont systemFontOfSize:14]; nd_remember_label.textColor = [UIColor labelColor];
     [nd_card addSubview:nd_remember_label]; [nd_remember_label release];
     nd_actions = [[UIStackView alloc] init]; nd_actions.axis = UILayoutConstraintAxisHorizontal; nd_actions.distribution = UIStackViewDistributionFillEqually; nd_actions.spacing = 8;
-    [nd_card addSubview:nd_actions]; [nd_actions release];
+    nd_action_scroll = [[UIScrollView alloc] init];
+    nd_action_scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [nd_card addSubview:nd_action_scroll]; [nd_action_scroll release];
+    [nd_action_scroll addSubview:nd_actions]; [nd_actions release];
 }
 static void nd_layout(void) {
-    if (!nd_card || !nd_kind) return;
+    if (!nd_card || !nd_kind || nd_answered) return;
     CGRect safe = CGRectInset(chrome_safe_rect(), 16, 16);
     if (nd_text_active() && nd_keyboard_top < CGRectGetMaxY(safe))
         safe.size.height = fmax(96, nd_keyboard_top - safe.origin.y - 12);
     const CGFloat width = fmin(nd_kind == ND_SAVE_LIST ? 600 : nd_kind == ND_IME ? 560 : 460, safe.size.width);
+    const BOOL compactInput = nd_text_active() && safe.size.height < 220;
+    if (nd_kind == ND_IME && nd_compact_input != compactInput) {
+        nd_compact_input = compactInput;
+        const int seq = nd_seq;
+        UINavigationItem *item = nd_nav.topItem;
+        UIBarButtonItem *cancel = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:nil action:@selector(fire)] autorelease];
+        cancel.target = action_for(cancel, ^{ nd_answer(ND_IME, seq, 1); });
+        item.leftBarButtonItem = compactInput ? cancel : nil;
+        if (compactInput) {
+            UIBarButtonItem *done = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:nil action:@selector(fire)] autorelease];
+            done.target = action_for(done, ^{ nd_answer(ND_IME, seq, 0); });
+            item.rightBarButtonItem = done; nd_confirm_item = done;
+        } else { item.rightBarButtonItem = cancel; nd_confirm_item = nil; }
+        nd_count_update();
+    }
     const BOOL vertical = nd_button_count > 2 || (nd_button_count > 1 && UIContentSizeCategoryIsAccessibilityCategory(g_host.traitCollection.preferredContentSizeCategory));
     const CGFloat buttonHeight = fmax(48, [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline].lineHeight + 22);
-    const CGFloat actionHeight = nd_button_count ? (vertical ? nd_button_count * buttonHeight + (nd_button_count - 1) * 8 : buttonHeight) : 0;
-    const CGFloat footer = actionHeight ? actionHeight + 32 : 20;
+    const CGFloat actionHeight = nd_button_count && !compactInput ? (vertical ? nd_button_count * buttonHeight + (nd_button_count - 1) * 8 : buttonHeight) : 0;
+    const CGFloat visibleActions = fmin(actionHeight, fmax(44,safe.size.height-124));
+    const CGFloat footer = actionHeight ? visibleActions + 32 : 20;
     const CGFloat heading = 52;
     const CGFloat text = text_height(nd_body.text, width - 48, nd_body.font);
     const CGFloat intro = nd_kind == ND_SAVE_LIST ? fmin(60, fmax(28, text)) : 0;
@@ -265,7 +290,11 @@ static void nd_layout(void) {
     nd_card.frame = CGRectMake(CGRectGetMidX(safe) - width/2, CGRectGetMidY(safe) - height/2, width, height);
     nd_nav.frame = CGRectMake(8,4,width-16,44);
     nd_actions.axis = vertical ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
-    nd_actions.frame = CGRectMake(20,height-actionHeight-16,width-40,actionHeight);
+    nd_action_scroll.frame = CGRectMake(20,height-visibleActions-16,width-40,visibleActions);
+    nd_action_scroll.hidden = compactInput;
+    nd_actions.frame = CGRectMake(0,0,width-40,actionHeight);
+    nd_action_scroll.contentSize = CGSizeMake(width-40,actionHeight);
+    nd_action_scroll.scrollEnabled = actionHeight > visibleActions;
     const CGFloat bottom = height - footer;
     nd_body.textAlignment = nd_kind == ND_SAVE_LIST ? NSTextAlignmentNatural : NSTextAlignmentCenter;
     nd_body.frame = CGRectMake(24,heading,width-48,fmax(20,bottom-heading-(nd_kind == ND_LAYOUT ? 52 : 0)-(!nd_progress.hidden || nd_spinner.isAnimating ? 24 : 0)));
@@ -278,7 +307,7 @@ static void nd_layout(void) {
     nd_remember.frame = CGRectMake(width-75,bottom-44,51,31);
     nd_remember_label.frame = CGRectMake(24,bottom-44,width-112,31);
     if (nd_text_active()) {
-        const BOOL compact = height < 190;
+        const BOOL compact = compactInput || height < 190;
         nd_count.hidden = compact;
         nd_field.frame = CGRectMake(20,heading,width-40,compact ? 34 : 46);
         nd_text.frame = CGRectMake(20,heading,width-40,fmax(32,bottom-heading-(compact ? 0 : 28)));
@@ -290,11 +319,17 @@ static void nd_build(NDRequest r) {
     nd_make(); [nd_card endEditing:YES];
     cfg_picker_dismiss(); bar_up_close_all(); touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
     nd_kind = r.kind; nd_seq = r.seq; nd_answered = 0; nd_back = r.back; nd_ime = r.ime;
+    nd_confirm_item = nil; nd_compact_input = -1;
     nd_selected = r.focus; nd_button_count = (int)r.labels.count;
     memset(nd_axis_direction,0,sizeof nd_axis_direction);
     [r.rows retain]; [nd_rows release]; nd_rows = r.rows;
     UINavigationItem *item = [[[UINavigationItem alloc] initWithTitle:r.title] autorelease];
-    if (r.back != ND_NO_BACK) item.rightBarButtonItem = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:nd_center action:@selector(back)] autorelease];
+    if (r.back != ND_NO_BACK) {
+        UIBarButtonItem *close = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:nil action:@selector(fire)] autorelease];
+        const int kind = r.kind, seq = r.seq, choice = r.back;
+        close.target = action_for(close, ^{ nd_answer(kind, seq, choice); });
+        item.rightBarButtonItem = close;
+    }
     [nd_nav setItems:@[item] animated:NO];
     for (UIView *v in nd_actions.arrangedSubviews) { [nd_actions removeArrangedSubview:v]; [v removeFromSuperview]; }
     memset(nd_buttons,0,sizeof nd_buttons);
@@ -333,6 +368,7 @@ static void nd_build(NDRequest r) {
     if (r.kind == ND_SAVE_LIST) nd_buttons[0].enabled = count > 0;
     [g_host bringSubviewToFront:nd_dim]; [g_host bringSubviewToFront:nd_card];
     ++nd_presentation; nd_card.userInteractionEnabled = YES;
+    nd_action_scroll.contentOffset = CGPointZero;
     nd_dim.hidden = nd_card.hidden = NO;
     [UIView animateWithDuration:chrome_duration(0.22) delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
         nd_dim.alpha = nd_card.alpha = 1;
@@ -435,6 +471,8 @@ static int nd_handle_event(const SDL_Event *event) {
             nd_buttons[i].layer.borderColor = [UIColor systemBlueColor].CGColor;
             nd_buttons[i].layer.cornerRadius = 24;
         }
+        if (nd_kind != ND_SAVE_LIST && nd_selected >= 0 && nd_selected < nd_button_count)
+            [nd_action_scroll scrollRectToVisible:nd_buttons[nd_selected].frame animated:!UIAccessibilityIsReduceMotionEnabled()];
     }
     if(back && nd_back!=ND_NO_BACK) nd_answer(nd_kind,nd_seq,nd_back);
     else if(confirm && (nd_kind==ND_SAVE_LIST ? nd_rows.length>0 : nd_button_count>0)) nd_answer(nd_kind,nd_seq,nd_selected);

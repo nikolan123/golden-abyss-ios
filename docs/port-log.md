@@ -782,3 +782,24 @@ exact executable equality and HTTP download length. Artifact:
 `NativUncharted-test45-unsigned.ipa`, 42,305,194 bytes; SHA-256
 `3355d204b3faa0d8aa4925c1d23ce9123b6167b49a7ac2e71f71a4b95b271508`.
 Check/build/package records are under `C:/ProgramData/t3/nativ-test45-*`.
+
+### Step 53 — test46 iOS presentation and interaction passes
+
+Replaced the custom quick-menu strip with a system menu. Native checked options,
+submenus and destructive styling now manage quick actions. Added real Liquid
+Glass on supported iOS versions with system-material and accessibility fallbacks.
+
+Save slots now use selectable inset cards with concise metadata and an explicit
+Save/Load/Delete action. Dialog cards adapt to content, keyboard space and larger
+text; compact text entry puts Done in the navigation bar. Transitions retain a
+stable surface while save steps advance, and callbacks preserve revision checks.
+
+Settings now opens a category list with Back/Done navigation and actual grouped
+sections. Long choices open a native navigation sheet with checkmarks rather
+than an alert action sheet. The final review includes stale callbacks, scroll
+stability, reduced motion/transparency, text composition and safe dismissal.
+
+The iOS build, full native Clang analysis, sanitized overlay/input suites and
+184-check dialog API suite pass. Device access is disabled here, so visual and
+interaction approval still needs a phone. See `docs/ios-ui-test46-polish.md`.
+These UI passes are committed locally and have not been pushed to GitHub.
