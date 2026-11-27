@@ -83,6 +83,7 @@ static void ios_ui_chrome_cancel_controls(void) { native_cancels++; }
 static int ios_gyro_on;                                  /* the phone's own sensor as a source (ios_motion.m) */
 static int window_gyro_present(void) { return pad_gyro || ios_gyro_on; }
 static uint64_t display_frames(void) { return 100; }    /* hooks.c's diagnostics name it in their lines */
+uint32_t uc_pc, uc_lock_n; float uc_lock_p[24][3];      /* hooks.c's lock-on bridge: adapters hold the slice's copies */
 static int touchpad_active(void) { for(int i=0;i<TP_FINGERS;i++) if(tp_down[i]) return 1; return 0; }
 static int game_gesture,game_twist;
 static int gesture_wanted(void) { return game_gesture; }
@@ -357,6 +358,57 @@ static void camera_hook(void) {
     close_to(guest_float(0x760),0.006f); close_to(guest_float(0x764),0.003f);
     puts("PASS: production Uncharted touch-to-camera hooks preserve exact yaw/pitch and retain desktop mouse scaling/invert");
 }
+static void snap_aim_lock(void) {
+    /* the lock-on: with aim held, the nearest visible actor's chest takes the camera --
+     * the bearing is exact in the camera's own basis, a centered target adds nothing, the
+     * held actor keeps the lock only within hysteresis, the player's own arena never
+     * does, letting go stops it, and the toggle and the pack's env kill-switch are honoured */
+    touchpad_cancel_all(); memset(guest, 0, sizeof guest);
+    tp_bits &= ~LTRIG; tp_aim_latched = 0; uc_pc = 0; uc_lock_n = 0;
+    Cpu c = {0}; c.r[0] = 0x600;                       /* the camera: basis at +0x40, position at +0x70, look at +0x160 */
+    WR32(0x640, 0x3f800000);                           /* right = (1,0,0) */
+    WR32(0x654, 0x3f800000);                           /* up = (0,1,0) */
+    WR32(0x668, 0x3f800000);                           /* back = (0,0,1): the view is along -z */
+    WR32(0x67c, 0x3f800000);                           /* the matrix's w */
+    uc_lock_n = 2;                                    /* two visible actors: one dead ahead, one 45 degrees right */
+    uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = -10.0f;
+    uc_lock_p[1][0] = 0.0f;  uc_lock_p[1][2] = -5.0f;
+    tp_bits |= LTRIG;                                 /* aim held */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    assert(!RD32(0x760) && !RD32(0x764));             /* the nearer bearing is dead ahead: nothing to add */
+    uc_lock_n = 1;                                    /* the ahead one dies; the 45-degree one is what's left */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    close_to(guest_float(0x760), 0.45f); assert(!RD32(0x764));   /* a hard pull, clamped at the snap rate */
+    WR32(0x760, 0); WR32(0x764, 0);
+    uc_lock_n = 2; uc_lock_p[1][0] = 1.0f; uc_lock_p[1][2] = -5.0f;   /* a fresh actor appears at a better bearing */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    close_to(guest_float(0x760), atanf(1.0f/5.0f));    /* the held 45-degree one is far outside hysteresis: the lock hands over */
+    WR32(0x760, 0); WR32(0x764, 0);
+    uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = -10.0f; uc_lock_n = 1;   /* the 45-degree one alone again */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    close_to(guest_float(0x760), 0.45f);
+    WR32(0x760, 0); WR32(0x764, 0);
+    uc_lock_p[0][0] = 0.0f; uc_lock_p[0][2] = -2.0f;   /* within 3 m of the lens: the player, never a target */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    assert(!RD32(0x760) && !RD32(0x764));
+    uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = 10.0f;  /* behind the lens: invisible to the lock */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    assert(!RD32(0x760) && !RD32(0x764));
+    uc_lock_p[0][0] = 10.0f; uc_lock_p[0][2] = -10.0f;
+    tp_bits &= ~LTRIG; tp_aim_latched = 0;             /* aim let go: the lock releases */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    assert(!RD32(0x760) && !RD32(0x764));
+    tp_bits |= LTRIG;
+    recomp_ihook_uc_look_velocity(&c, 0);              /* it takes the target again when aim returns */
+    close_to(guest_float(0x760), 0.45f);
+    WR32(0x760, 0); WR32(0x764, 0);
+    setenv("RECOMP_UC_SNAP", "0", 1);                  /* the pack's kill-switch: off */
+    recomp_ihook_uc_look_velocity(&c, 0);
+    assert(!RD32(0x760) && !RD32(0x764));
+    setenv("RECOMP_UC_SNAP", "1", 1);
+    tp_bits &= ~LTRIG; tp_aim_latched = 0; uc_lock_n = 0;
+    puts("PASS: snap aim holds the nearest visible enemy, hands over inside hysteresis, never takes the player, and lets go with the aim");
+}
 static void game_menu_routing(void) {
     touchpad_cancel_all(); setenv("RECOMP_TOUCH_GAMEPLAY_GATE","1",1);
     assert(!tl_gameplay_allowed());
@@ -512,7 +564,7 @@ static void tilt_gate(void) {
     tilt_section=0; pad_gyro=0; ios_gyro_on=0; sticks[0]=128;
     puts("PASS: a tilt section takes the left stick only without a gyro source -- a pad's or the phone's");
 }
-int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); game_menu_routing(); native_shooting(); tilt_gate(); return 0; }
+int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); game_menu_routing(); native_shooting(); tilt_gate(); snap_aim_lock(); return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='nativ-touchpad-') as folder:
     source = Path(folder) / 'test.c'

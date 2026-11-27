@@ -1078,6 +1078,7 @@ int touchpad_native_shoot_available(void) {
 #endif
 }
 int touchpad_native_aim_latched(void) { return tp_aim_latched; }
+int touchpad_native_aim_held(void) { return (tp_bits & LTRIG) != 0 || tp_aim_latched; }
 static void tp_shoot_reset(int release_fire) {
 	int changed = tp_aim_latched;
 	tp_aim_latched = 0;

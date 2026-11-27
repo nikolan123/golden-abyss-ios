@@ -595,6 +595,19 @@ void recomp_hook_uc_balance_tick(Cpu *c) { (void)c; extern void window_tilt_tick
  * 0x818c9cd0), the same move-controller base -- its slot 3, fn_811e1016, ran on every frame of a 3218-frame count
  * window down the slide (the canoe's and the balance's slot 3: none) */
 void recomp_hook_uc_slide_tick(Cpu *c) { (void)c; extern void window_tilt_tick(int kind); window_tilt_tick(2); }
+/* The lock-on's bridge between the two halves of a frame: the render reset below owns the
+ * frame's item list -- what is drawn, so what is visible -- and the camera hook further
+ * down owns the aim. Not static: the test's slice starts inside this file, and its copy of
+ * the camera half links against adapters' definitions of these. uc_pc is the player's
+ * controller (uc_gameplay_touch's r0, that update's own anchor); the table holds one aim
+ * point per visible moving actor: a render item's owner object keeps four world-space
+ * points on the actor (words 12/16/20/24 of the 128 bytes the trace dumps -- Step 59's
+ * capture: they move together with the actor, head high), and their mean is the chest the
+ * crosshair takes. */
+volatile uint32_t uc_pc;               /* the player's controller, 0 before the first gameplay update */
+volatile uint32_t uc_lock_n;           /* this frame's visible moving actors (drawn = visible), aim points next */
+volatile float uc_lock_p[24][3];
+static volatile uint32_t uc_item_cap = 2048;
 void recomp_hook_uc_items_reset(Cpu *c) {
 	uint32_t n = RD32(c->r[0] + 0xeac);
 	if (n > uc_items_peak) uc_items_peak = n;
@@ -656,6 +669,42 @@ void recomp_hook_uc_items_reset(Cpu *c) {
 			}
 		}
 	}
+	/* the lock-on's table, rebuilt at every reset while the pack has it on: the frame's
+	 * moving actors, one entry per owner -- words 2/3 = -1 mark an item as a moving
+	 * actor's, several items share one owner, and the player's items own the controller's
+	 * own arena (within +0x1000 of uc_pc; Step 58/59's captures). The aim point is the
+	 * mean of the owner's four points, the chest; anything not finite is dropped. */
+	{
+		static int on = -1;
+		if (on < 0) { const char *e = getenv("RECOMP_UC_SNAP"); on = !(e && *e == '0'); }
+		uint32_t n = 0;
+		if (on) {
+			uint32_t r = c->r[0], list = RD32(r + 0xeb0), cnt = RD32(r + 0xeac);
+			if (cnt > uc_item_cap) cnt = uc_item_cap;
+			uint32_t seen[24];
+			for (uint32_t i = 0; i < cnt && n < 24; i++) {
+				uint32_t it = RD32(list + 4 * i);
+				if (!it || RD32(it + 8) != 0xffffffffu) continue;
+				uint32_t own = RD32(it + 40);
+				if (!own || (uc_pc && own >= uc_pc - 0x400 && own <= uc_pc + 0x1000)) continue;
+				uint32_t j = 0;
+				while (j < n && seen[j] != own) j++;
+				if (j < n) continue;
+				float x = 0, y = 0, z = 0; int ok = 1;
+				for (int w = 0; w < 4; w++) {
+					uint32_t wx = RD32(own + 0x30 + 0x10 * w), wy = RD32(own + 0x34 + 0x10 * w), wz = RD32(own + 0x38 + 0x10 * w);
+					float fx, fy, fz; memcpy(&fx, &wx, 4); memcpy(&fy, &wy, 4); memcpy(&fz, &wz, 4);
+					if (!(-1e5f < fx && fx < 1e5f && -1e5f < fy && fy < 1e5f && -1e5f < fz && fz < 1e5f)) { ok = 0; break; }
+					x += fx; y += fy; z += fz;
+				}
+				if (!ok) continue;
+				seen[n] = own;
+				uc_lock_p[n][0] = x * 0.25f; uc_lock_p[n][1] = y * 0.25f; uc_lock_p[n][2] = z * 0.25f;
+				n++;
+			}
+		}
+		uc_lock_n = n;
+	}
 }
 /* The pools themselves, made 4x larger (8192 items): fn_812419d0, the renderer's setup (once, from
  * fn_8124570e), allocates the item storage (+0xea4, 64 bytes an item), the array of pointers to them
@@ -664,7 +713,6 @@ void recomp_hook_uc_items_reset(Cpu *c) {
  * the host's guest allocator in their place, so the game's own heap stays exactly as it was. Nothing
  * else is sized to 2048: the frame's sort is a qsort of the list (fn_81254684) into at most 16 key
  * buckets, and the objects' matrix buffers (+0xedc, FUN_812445f6) are separate and untouched. */
-static volatile uint32_t uc_item_cap = 2048;
 void recomp_ihook_uc_item_pools(Cpu *c, int reg) {
 	(void)reg;
 	enum { K = 4 };
@@ -1207,6 +1255,8 @@ void recomp_ihook_uc_zone_done(Cpu *c, int reg) {
  * the exact mouse/touch displacement in radians. Touch remains independent of
  * the mouse's capture, sensitivity, invert and raw-look preference. */
 int window_mouse_delta(float *dx, float *dy); float window_mouse_sens(void); int window_mouse_invert(void); int window_raw_look(void);
+extern volatile uint32_t uc_pc, uc_lock_n; extern volatile float uc_lock_p[24][3];   /* the render reset's, above */
+int touchpad_native_aim_held(void);   /* the touchpad's L held or its latch -- the lock-on's trigger */
 /* RECOMP_YAW_DIAG=1: twice a second, the active camera (DAT_81905310's camera manager: **(mgr+0x5c)+8 when
  * mgr+0x60, the camera FUN_81040eda returns) and every float of its first 0x400 bytes that changed since
  * the last look -- turning the view shows which fields are its yaw/pitch */
@@ -1290,14 +1340,71 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 			}
 		}
 	}
-	if (uc_mx == 0 && uc_my == 0) return;
+	if (uc_mx == 0 && uc_my == 0 && !uc_lock_n) return;
+	/* the Uncharted 4-style lock: while a thumb holds aim, the nearest visible actor's
+	 * chest takes the camera. The render reset leaves the frame's actors (drawn =
+	 * visible, the player excluded there), the camera's own basis (+0x40: its rows are
+	 * right, up and the view's opposite, Step 59 measured the view along minus the
+	 * third) and position (+0x70) turn a chest into an exact error angle, and that
+	 * angle is the frame's look velocity -- a hard pull onto the target, then tracking,
+	 * with a deadband so a centered target sits still. The chosen actor keeps the lock
+	 * while it stays visible within half again of the best bearing, so two enemies at
+	 * similar angles do not trade it; a dead one drops out of the list and the lock
+	 * moves on. The toggle is "snap_aim" (Controls), the pack's RECOMP_UC_SNAP its
+	 * default; the touch's own deltas still add, so a drag can break out and the lock
+	 * hands over to the better bearing. */
+	float lx = 0, ly = 0;
+	{
+		static uint32_t owner;   /* the actor the lock holds: an index into uc_lock_p, plus one */
+		const char *se = getenv("RECOMP_UC_SNAP");
+		if (!(uc_lock_n && touchpad_native_aim_held() &&
+			settings_float("snap_aim", se && *se ? (float)atof(se) : 1.0f) > 0.5f)) owner = 0;
+		else {
+			float b[9], pos[3]; int ok = 1;
+			for (int i = 0; i < 9; i++) { uint32_t w = RD32(cam + 0x40 + 4 * (i + i / 3)); memcpy(&b[i], &w, 4); if (!(-1e6f < b[i] && b[i] < 1e6f)) ok = 0; }   /* the basis rows of the 4x4: words 0-2, 4-6, 8-10 */
+			for (int i = 0; i < 3; i++) { uint32_t w = RD32(cam + 0x70 + 4 * i); memcpy(&pos[i], &w, 4); if (!(-1e6f < pos[i] && pos[i] < 1e6f)) ok = 0; }
+			if (!ok) owner = 0;
+			else {
+				float best = 1e9f, hold = -1.0f; uint32_t pick = 0; float py_ = 0, pp_ = 0, hy_ = 0, hp_ = 0;
+				for (uint32_t t = 0; t < uc_lock_n && t < 24; t++) {
+					float dx = uc_lock_p[t][0] - pos[0], dy = uc_lock_p[t][1] - pos[1], dz = uc_lock_p[t][2] - pos[2];
+					if (dx * dx + dy * dy + dz * dz < 9.0f) continue;   /* the player: the camera rides 2.8 m from him */
+					float X = dx * b[0] + dy * b[1] + dz * b[2];        /* along the camera's right */
+					float Y = dx * b[3] + dy * b[4] + dz * b[5];        /* along its up */
+					float Z = dx * -b[6] + dy * -b[7] + dz * -b[8];    /* along the view: minus the third row */
+					if (Z <= 0) continue;                               /* behind the lens */
+					float yaw = atan2f(X, Z), pit = atan2f(Y, Z), ang = yaw * yaw + pit * pit;
+					if (ang < best) { best = ang; pick = t + 1; py_ = yaw; pp_ = pit; }
+					if (t + 1 == owner) { hold = ang; hy_ = yaw; hp_ = pit; }
+				}
+				if (pick && hold >= 0.0f && hold < best * 1.6f + 0.0004f) { pick = owner; py_ = hy_; pp_ = hp_; }
+				owner = pick;
+				if (pick) {
+					lx = py_; ly = -pp_;   /* the touch path's signs: +160 turns right, +164 looks down */
+					if (lx > 0.45f) lx = 0.45f;
+					if (lx < -0.45f) lx = -0.45f;
+					if (ly > 0.45f) ly = 0.45f;
+					if (ly < -0.45f) ly = -0.45f;
+					if (fabsf(lx) < 0.004f) lx = 0;   /* deadband: a locked-on target adds no jitter */
+					if (fabsf(ly) < 0.004f) ly = 0;
+					{
+						static int n; extern uint64_t display_frames(void);
+						if (getenv("RECOMP_UC_LOCK_TRACE") && n++ % 60 == 0)
+							fprintf(stderr, "uc snap: frame %llu target %u of %u yaw %.3f pit %.3f v %.3f %.3f\n",
+								(unsigned long long)display_frames(), pick - 1, uc_lock_n, py_, pp_, lx, ly);
+					}
+				}
+			}
+		}
+	}
+	if (uc_mx == 0 && uc_my == 0 && lx == 0 && ly == 0) return;
 	/* the magnet: the assist's own component (the game's turn minus the nudge's residue, a
 	 * fixed ~0.002 rad/frame along the drag) scales by the strength and adds to the exact
 	 * touch deltas -- the pull toward the target at what a thumb can feel. Lowpassed, so a
 	 * pull that flips sign at the target's centre eases over it instead of jittering, and
 	 * clamped, so a scripted turn never becomes a lurch. */
 	static float mag_x, mag_y;
-	float vx = uc_mx, vy = uc_my;
+	float vx = uc_mx + lx, vy = uc_my + ly;
 	const float k = uc_aim_magnet();
 	if (k > 0) {
 		float gx = px - uc_nx * 0.002f, gy = py - uc_ny * 0.002f;
@@ -1318,6 +1425,7 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
  * checks at 0x810ee974/0x810ee982. Main-menu screens do not reach this body. */
 void recomp_ihook_uc_gameplay_touch(Cpu *c, int reg) {
     (void)reg;
+    uc_pc = c->r[0];   /* the lock-on excludes the player by the controller's own arena */
     /* RECOMP_UC_LOCK_TRACE: the player-controller update's registers, once a second -- the
      * controller object's address, the anchor the actor list is reached from. */
     {

@@ -1049,3 +1049,44 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   in the log. One fight played against this build gives the enemy
   positions, the camera's own position and basis, and the frames they
   were aimed in.
+
+### Step 60 — the lock itself: what is drawn is what is visible, and the nearest chest takes the camera
+
+- Step 59's capture settled the last two unknowns. The
+  actor's owner object carries four world-space points on
+  the body (words 12/16/20/24, ~1.5 m apart, moving with
+  the actor; the highest rides where a head would), and the
+  camera object holds its full 4x4 world matrix at +0x40 --
+  rows right, up and the view's opposite, the translation
+  at +0x70 the position itself: measured against the same
+  seconds' actors, the camera sits 2.7-2.9 m from the
+  player's chest every gameplay frame, and the game's own
+  scripted turns write up to 1.35 rad/frame, so a hard
+  snap's rate is nothing the solver has not seen.
+- The lock, then: the render reset (which already walks
+  the frame's item list) tabulates every moving actor --
+  words 2/3 = -1, one owner per actor, the player excluded
+  by the gameplay hook's controller pointer (and by the
+  3 m the camera keeps from him) -- as the mean of the
+  owner's four points, the chest. The camera hook, when a
+  thumb holds aim (L held or latched) and "Snap aim" is
+  on (Controls; the pack's RECOMP_UC_SNAP its default),
+  turns the camera's own basis on each chest into an exact
+  yaw/pitch error and writes it as the frame's look
+  velocity: a hard pull (clamped at 0.45 rad/frame, about
+  a quarter turn a second at the clamp) that becomes
+  tracking once the crosshair is on the chest, with a
+  deadband so a locked target sits still and the touch's
+  own deltas still composing on top, so a drag can break
+  out. The chosen actor keeps the lock while it stays
+  visible within half again of the best bearing; a dead
+  one leaves the render list and the lock moves to the
+  next nearest. Letting go of aim releases it.
+- The camera matrix's rows are strided words of a 4x4
+  (right/up/back at words 0-2, 4-6, 8-10) -- the first
+  cut read them contiguously and the test's zero w-column
+  caught it before a device ever did. Tests cover the
+  dead-ahead stillness, the clamped pull, the handover
+  inside hysteresis, the player's 3 m exclusion, the
+  behind-the-lens skip, the release and the env
+  kill-switch.
