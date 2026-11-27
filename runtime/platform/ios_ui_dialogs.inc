@@ -9,7 +9,7 @@
 enum { ND_NONE, ND_SAVE_LIST, ND_SAVE_QUESTION, ND_SAVE_WAIT, ND_MESSAGE, ND_IME, ND_QUIT, ND_LAYOUT, ND_PREP };
 #define ND_NO_BACK (-999)
 typedef struct {
-    int kind, seq, percent, back, focus;
+    int kind, seq, percent, back, focus, save_mode;
     NSString *title, *body, *initial;
     NSArray *labels;
     NSData *rows;
@@ -30,6 +30,8 @@ static UIButton *nd_buttons[3];
 static UIBarButtonItem *nd_confirm_item;
 static int nd_compact_input = -1;
 static NSData *nd_rows;
+static NSArray *nd_save_indices;
+static UIAlertController *nd_alert;
 static NSString *nd_draft;
 static int nd_draft_seq = -1;
 static ImeDlgView nd_ime;
@@ -45,6 +47,9 @@ static void nd_answer(int kind, int seq, int choice);
 static const SaveDlgRow *nd_save_row(NSInteger index) {
     return index >= 0 && index < (NSInteger)(nd_rows.length / sizeof(SaveDlgRow)) ? &((const SaveDlgRow *)nd_rows.bytes)[index] : NULL;
 }
+static NSInteger nd_save_index(NSIndexPath *path) {
+    return path && path.section == 0 && path.row >= 0 && path.row < (NSInteger)nd_save_indices.count ? [nd_save_indices[path.row] integerValue] : -1;
+}
 static NSString *nd_save_summary(const SaveDlgRow *row) {
     if (!row->exists) return @"Create a new save";
     NSMutableArray *parts = [NSMutableArray array];
@@ -59,10 +64,11 @@ static void nd_focus_save(NSInteger index, BOOL scroll) {
     nd_selected = (int)index;
     for (NSIndexPath *path in nd_table.indexPathsForVisibleRows) {
         UITableViewCell *cell = [nd_table cellForRowAtIndexPath:path];
-        cell.accessoryType = path.section == index ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-        cell.accessibilityTraits = UIAccessibilityTraitButton | (path.section == index ? UIAccessibilityTraitSelected : 0);
+        cell.accessoryType = nd_save_index(path) == index ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        cell.accessibilityTraits = UIAccessibilityTraitButton | (nd_save_index(path) == index ? UIAccessibilityTraitSelected : 0);
     }
-    [nd_table selectRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:index] animated:scroll scrollPosition:scroll ? UITableViewScrollPositionMiddle : UITableViewScrollPositionNone];
+    const NSUInteger visible = [nd_save_indices indexOfObject:@(index)];
+    if (visible != NSNotFound) [nd_table selectRowAtIndexPath:[NSIndexPath indexPathForRow:visible inSection:0] animated:scroll scrollPosition:scroll ? UITableViewScrollPositionMiddle : UITableViewScrollPositionNone];
 }
 
 /* NSString.length is UTF-16 units, matching SceImeDialog's maxTextLength. */
@@ -112,16 +118,16 @@ static NativeDialogCenter *nd_center;
     nd_layout();
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table {
-    (void)table; return nd_rows.length / sizeof(SaveDlgRow);
+    (void)table; return nd_save_indices.count ? 1 : 0;
 }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    (void)table; return nd_save_row(section) ? 1 : 0;
+    (void)table; (void)section; return nd_save_indices.count;
 }
 - (CGFloat)tableView:(UITableView *)table heightForRowAtIndexPath:(NSIndexPath *)path {
     (void)table; (void)path; return UITableViewAutomaticDimension;
 }
 - (CGFloat)tableView:(UITableView *)table heightForHeaderInSection:(NSInteger)section {
-    (void)table; (void)section; return 10;
+    (void)table; (void)section; return 0.01;
 }
 - (CGFloat)tableView:(UITableView *)table heightForFooterInSection:(NSInteger)section {
     (void)table; (void)section; return CGFLOAT_MIN;
@@ -129,27 +135,29 @@ static NativeDialogCenter *nd_center;
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [table dequeueReusableCellWithIdentifier:@"save"];
     if (!cell) cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"save"] autorelease];
-    const SaveDlgRow *row = nd_save_row(path.section);
+    const NSInteger index = nd_save_index(path);
+    const SaveDlgRow *row = nd_save_row(index);
     if (!row) return cell;
     UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
     content.text = row->exists ? (nd_string(row->title).length ? nd_string(row->title) : @"Saved Game") : @"New Save";
     content.secondaryText = nd_save_summary(row);
     content.image = [UIImage systemImageNamed:row->exists ? @"doc.text" : @"plus.rectangle.on.folder"];
     content.imageProperties.tintColor = [UIColor systemBlueColor];
-    content.textProperties.numberOfLines = 2; content.secondaryTextProperties.numberOfLines = 3;
+    content.textProperties.numberOfLines = 2; content.secondaryTextProperties.numberOfLines = 2;
     content.textProperties.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
     content.secondaryTextProperties.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     content.secondaryTextProperties.color = [UIColor secondaryLabelColor];
     cell.contentConfiguration = content; cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
-    cell.accessoryType = path.section == nd_selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    cell.accessoryType = index == nd_selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     cell.tintColor = [UIColor systemBlueColor];
-    cell.accessibilityTraits = UIAccessibilityTraitButton | (path.section == nd_selected ? UIAccessibilityTraitSelected : 0);
+    cell.accessibilityTraits = UIAccessibilityTraitButton | (index == nd_selected ? UIAccessibilityTraitSelected : 0);
     return cell;
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     (void)table;
-    if (!nd_active() || nd_kind != ND_SAVE_LIST || !nd_save_row(path.section)) return;
-    nd_focus_save(path.section, NO); /* keep scroll position while selecting another card */
+    const NSInteger index = nd_save_index(path);
+    if (!nd_active() || nd_kind != ND_SAVE_LIST || !nd_save_row(index)) return;
+    nd_focus_save(index, NO);
     nd_buttons[0].enabled = YES;
     ios_ui_haptic(0);
 }
@@ -166,10 +174,49 @@ static NativeDialogCenter *nd_center;
 - (void)textChanged:(id)sender { (void)sender; nd_count_update(); }
 @end
 
+static void nd_close_alert(void) {
+    UIAlertController *alert = nd_alert; nd_alert = nil;
+    if (alert && !alert.isBeingDismissed) [alert dismissViewControllerAnimated:NO completion:nil];
+    [alert release];
+}
+static void nd_present_alert(UIAlertController *alert, int kind, int seq) {
+    if (nd_alert != alert || nd_kind != kind || nd_seq != seq || nd_answered) return;
+    UIViewController *presenter = g_win.rootViewController;
+    if (presenter.presentedViewController) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50000000), dispatch_get_main_queue(), ^{ nd_present_alert(alert,kind,seq); });
+        return;
+    }
+    [presenter presentViewController:alert animated:!UIAccessibilityIsReduceMotionEnabled() completion:nil];
+}
+static void nd_build_alert(NDRequest r) {
+    nd_close_alert();
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:r.title message:r.body preferredStyle:UIAlertControllerStyleAlert];
+    alert.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    __block UIAlertController *weakAlert = alert;
+    for (NSUInteger i=0;i<r.labels.count;i++) {
+        const int kind=r.kind, seq=r.seq, choice=(int)i;
+        const BOOL destructive=kind==ND_QUIT && i==1;
+        const BOOL cancel=kind==ND_QUIT ? i==0 : kind==ND_SAVE_QUESTION ? i==1 : choice==r.back;
+        UIAlertAction *action=[UIAlertAction actionWithTitle:r.labels[i] style:destructive ? UIAlertActionStyleDestructive : cancel ? UIAlertActionStyleCancel : UIAlertActionStyleDefault handler:^(UIAlertAction *sender) {
+            (void)sender;
+            if (nd_alert!=weakAlert) return;
+            nd_alert=nil; [weakAlert release];
+            nd_answer(kind,seq,choice);
+        }];
+        [alert addAction:action];
+        if (i==0) alert.preferredAction=action;
+    }
+    nd_alert=[alert retain];
+    nd_dim.hidden=nd_card.hidden=YES; nd_dim.alpha=nd_card.alpha=0;
+    memset(nd_buttons,0,sizeof nd_buttons); ++nd_presentation;
+    nd_present_alert(alert,r.kind,r.seq);
+}
 static void nd_hide(void) {
+    nd_close_alert();
     nd_store_draft();
     [nd_card endEditing:YES]; nd_card.userInteractionEnabled = NO;
     [nd_rows release]; nd_rows = nil;
+    [nd_save_indices release]; nd_save_indices = nil;
     nd_kind = ND_NONE; nd_seq = -1; nd_answered = 0;
     const NSUInteger presentation = ++nd_presentation;
     [UIView animateWithDuration:chrome_duration(0.16) delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
@@ -183,7 +230,7 @@ static void nd_answer(int kind, int seq, int choice) {
     if (kind != nd_kind || seq != nd_seq || nd_answered) return;
     if (kind == ND_SAVE_LIST && choice != SAVEDLG_CANCEL) {
         choice = nd_selected;
-        if (!nd_save_row(choice)) return;
+        if (!nd_save_row(choice) || ![nd_save_indices containsObject:@(choice)]) return;
     }
     if (kind == ND_IME && choice == 0 && (!nd_valid_text(nd_current_text()) || (nd_ime.multiline ? nd_text.markedTextRange : nd_field.markedTextRange))) return;
     nd_answered = 1;
@@ -195,6 +242,7 @@ static void nd_answer(int kind, int seq, int choice) {
     else if (kind == ND_LAYOUT) overlay_native_answer(NATIVE_CARD_LAYOUT, seq, choice < 0 ? 1 : choice + 1, choice < 0 ? 0 : nd_remember.on);
     else if (kind == ND_PREP) overlay_native_answer(NATIVE_CARD_PREP, seq, 0, 0);
     if (kind == ND_IME) nd_clear_draft();
+    nd_close_alert();
     [nd_card endEditing:YES]; nd_card.userInteractionEnabled = NO;
 }
 static void nd_make(void) {
@@ -224,6 +272,10 @@ static void nd_make(void) {
     nd_table.dataSource = nd_center; nd_table.delegate = nd_center; nd_table.backgroundColor = [UIColor clearColor];
     nd_table.estimatedRowHeight = 100;
     nd_table.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    nd_table.insetsContentViewsToSafeArea = NO;
+    nd_table.sectionHeaderTopPadding = 0;
+    nd_table.tableHeaderView = [[[UIView alloc] initWithFrame:CGRectMake(0,0,1,0.01)] autorelease];
+    nd_table.tableFooterView = [[[UIView alloc] initWithFrame:CGRectMake(0,0,1,0.01)] autorelease];
     [nd_card addSubview:nd_table]; [nd_table release];
     nd_field = [[UITextField alloc] init]; nd_field.borderStyle = UITextBorderStyleRoundedRect; nd_field.delegate = nd_center;
     nd_field.textColor = [UIColor labelColor]; nd_field.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
@@ -252,11 +304,11 @@ static void nd_make(void) {
     [nd_action_scroll addSubview:nd_actions]; [nd_actions release];
 }
 static void nd_layout(void) {
-    if (!nd_card || !nd_kind || nd_answered) return;
+    if (!nd_card || !nd_kind || nd_answered || nd_alert) return;
     CGRect safe = CGRectInset(chrome_safe_rect(), 16, 16);
     if (nd_text_active() && nd_keyboard_top < CGRectGetMaxY(safe))
         safe.size.height = fmax(96, nd_keyboard_top - safe.origin.y - 12);
-    const CGFloat width = fmin(nd_kind == ND_SAVE_LIST ? 600 : nd_kind == ND_IME ? 560 : 460, safe.size.width);
+    const CGFloat width = fmin(nd_kind == ND_SAVE_LIST ? 440 : nd_kind == ND_IME ? 500 : 340, safe.size.width);
     const BOOL compactInput = nd_text_active() && safe.size.height < 220;
     if (nd_kind == ND_IME && nd_compact_input != compactInput) {
         nd_compact_input = compactInput;
@@ -277,15 +329,15 @@ static void nd_layout(void) {
     const CGFloat actionHeight = nd_button_count && !compactInput ? (vertical ? nd_button_count * buttonHeight + (nd_button_count - 1) * 8 : buttonHeight) : 0;
     const CGFloat visibleActions = fmin(actionHeight, fmax(44,safe.size.height-124));
     const CGFloat footer = actionHeight ? visibleActions + 32 : 20;
-    const CGFloat heading = 52;
+    const CGFloat heading = 48;
     const CGFloat text = text_height(nd_body.text, width - 48, nd_body.font);
-    const CGFloat intro = nd_kind == ND_SAVE_LIST ? fmin(60, fmax(28, text)) : 0;
-    const NSInteger slots = nd_rows.length / sizeof(SaveDlgRow);
+    const CGFloat intro = nd_kind == ND_SAVE_LIST && nd_body.text.length ? fmin(44,text+8) : 0;
+    const NSInteger slots = nd_save_indices.count;
     CGFloat content;
-    if (nd_kind == ND_SAVE_LIST) content = intro + fmax(84, slots * 108);
+    if (nd_kind == ND_SAVE_LIST) content = intro + fmax(72, slots * 76);
     else if (nd_kind == ND_IME) content = nd_ime.multiline ? 160 : 80;
     else content = fmax(40, text) + (nd_kind == ND_LAYOUT ? 52 : 0) + (!nd_progress.hidden || nd_spinner.isAnimating ? 28 : 0);
-    const CGFloat height = fmin(safe.size.height, fmax(176, heading + content + footer + 20));
+    const CGFloat height = fmin(safe.size.height, fmax(144, heading + content + footer + 8));
     nd_dim.frame = g_host.bounds;
     nd_card.frame = CGRectMake(CGRectGetMidX(safe) - width/2, CGRectGetMidY(safe) - height/2, width, height);
     nd_nav.frame = CGRectMake(8,4,width-16,44);
@@ -323,6 +375,20 @@ static void nd_build(NDRequest r) {
     nd_selected = r.focus; nd_button_count = (int)r.labels.count;
     memset(nd_axis_direction,0,sizeof nd_axis_direction);
     [r.rows retain]; [nd_rows release]; nd_rows = r.rows;
+    NSMutableArray *visible = [NSMutableArray array];
+    BOOL empty = NO;
+    for (NSUInteger i=0;i<nd_rows.length/sizeof(SaveDlgRow);i++) {
+        const SaveDlgRow *row=nd_save_row(i);
+        if (row->exists || (r.save_mode==1 && !empty)) {
+            [visible addObject:@(i)];
+            if (!row->exists) empty=YES;
+        }
+    }
+    [nd_save_indices release]; nd_save_indices=[visible copy];
+    if (r.kind==ND_SAVE_QUESTION || r.kind==ND_QUIT || (r.kind==ND_MESSAGE && r.labels.count && r.percent<0)) {
+        nd_build_alert(r); return;
+    }
+    nd_close_alert();
     UINavigationItem *item = [[[UINavigationItem alloc] initWithTitle:r.title] autorelease];
     if (r.back != ND_NO_BACK) {
         UIBarButtonItem *close = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:nil action:@selector(fire)] autorelease];
@@ -343,10 +409,11 @@ static void nd_build(NDRequest r) {
         [nd_actions addArrangedSubview:button]; nd_buttons[i]=button;
     }
     nd_body.text = r.body ?: @"";
+    if (r.kind==ND_SAVE_LIST && !nd_save_indices.count) nd_body.text=@"No saved games yet.";
     nd_progress.hidden = r.percent < 0;
     nd_progress.progress = fmaxf(0,fminf(1,r.percent/100.0f));
     [nd_spinner stopAnimating];
-    nd_table.hidden = r.kind != ND_SAVE_LIST; nd_body.hidden = r.kind == ND_SAVE_LIST || r.kind == ND_IME;
+    nd_table.hidden = r.kind != ND_SAVE_LIST; nd_body.hidden = (r.kind == ND_SAVE_LIST && !nd_body.text.length) || r.kind == ND_IME;
     nd_field.hidden = r.kind != ND_IME || r.ime.multiline; nd_text.hidden = r.kind != ND_IME || !r.ime.multiline;
     nd_count.hidden = r.kind != ND_IME; nd_remember.hidden = nd_remember_label.hidden = r.kind != ND_LAYOUT;
     nd_remember.on = NO;
@@ -360,9 +427,9 @@ static void nd_build(NDRequest r) {
         dispatch_async(dispatch_get_main_queue(), ^{ if (nd_kind == ND_IME && nd_seq == seq && !nd_answered) [(nd_ime.multiline ? (UIView *)nd_text : (UIView *)nd_field) becomeFirstResponder]; });
     }
     nd_layout(); [nd_table reloadData];
-    const NSInteger count = nd_rows.length/sizeof(SaveDlgRow);
+    const NSInteger count = nd_save_indices.count;
     if (r.kind == ND_SAVE_LIST && count) {
-        nd_selected = (int)fmax(0,fmin(nd_selected,count-1));
+        if (![nd_save_indices containsObject:@(nd_selected)]) nd_selected=[nd_save_indices[0] intValue];
         nd_focus_save(nd_selected, YES);
     }
     if (r.kind == ND_SAVE_LIST) nd_buttons[0].enabled = count > 0;
@@ -399,12 +466,11 @@ static NDRequest nd_request(NativeOverlayState host) {
     if (kind) {
         r.kind=kind==SAVEDLG_LIST ? ND_SAVE_LIST : kind==SAVEDLG_YESNO ? ND_SAVE_QUESTION : ND_SAVE_WAIT;
         r.seq=save.seq; r.title=save.disp==1 ? @"Save Game" : save.disp==2 ? @"Load Game" : save.disp==3 ? @"Delete Save" : save.title[0] ? nd_string(save.title) : @"Saved Games";
-        r.body=nd_string(save.msg); r.percent=save.percent;
+        r.body=nd_string(save.msg); r.percent=save.percent; r.save_mode=save.disp;
         if (kind==SAVEDLG_LIST) {
             r.focus=save.focus; r.back=SAVEDLG_CANCEL;
             r.rows=nd_kind==r.kind && nd_seq==r.seq ? nd_rows : [NSData dataWithBytes:save.rows length:(NSUInteger)save.nrows*sizeof(SaveDlgRow)];
             r.labels=@[save.disp==1 ? @"Save" : save.disp==3 ? @"Delete" : @"Load"];
-            if (!r.body.length) r.body=save.nrows ? @"Choose a save to continue." : @"No saved games yet.";
         }
         if (kind==SAVEDLG_YESNO) { r.labels=@[@"Yes",@"No"]; r.back=SAVEDLG_CANCEL; }
     }
@@ -418,11 +484,15 @@ static void nd_tick(void) {
     if (!r.kind) { if(nd_kind) nd_hide(); if (!overlay_is_open()) nd_clear_draft(); }
     else if (r.kind!=nd_kind || r.seq!=nd_seq) nd_build(r);
     if (r.kind && !nd_answered) {
-        if (![nd_body.text isEqualToString:r.body ?: @""]) nd_body.text=r.body ?: @"";
-        nd_progress.hidden=r.percent<0; nd_progress.progress=fmaxf(0,fminf(1,r.percent/100.0f));
-        const BOOL wait=(r.kind==ND_SAVE_WAIT || r.kind==ND_MESSAGE) && !r.labels.count && r.percent<0;
-        if(wait) [nd_spinner startAnimating]; else [nd_spinner stopAnimating];
-        nd_layout(); [g_host bringSubviewToFront:nd_dim]; [g_host bringSubviewToFront:nd_card];
+        NSString *body = r.kind==ND_SAVE_LIST && !nd_save_indices.count ? @"No saved games yet." : r.body ?: @"";
+        if (nd_alert) { nd_alert.title=r.title; nd_alert.message=body; }
+        else {
+            if (![nd_body.text isEqualToString:body]) nd_body.text=body;
+            nd_progress.hidden=r.percent<0; nd_progress.progress=fmaxf(0,fminf(1,r.percent/100.0f));
+            const BOOL wait=(r.kind==ND_SAVE_WAIT || r.kind==ND_MESSAGE) && !r.labels.count && r.percent<0;
+            if(wait) [nd_spinner startAnimating]; else [nd_spinner stopAnimating];
+            nd_layout(); [g_host bringSubviewToFront:nd_dim]; [g_host bringSubviewToFront:nd_card];
+        }
     }
     if (host.prep_state==2 && host.total>0 && !r.kind && !overlay_is_open()) {
         if(!nd_corner) {
@@ -462,20 +532,27 @@ static int nd_handle_event(const SDL_Event *event) {
         nd_axis_direction[axis]=next;
     }
     if(move) {
-        const int count=nd_kind==ND_SAVE_LIST ? (int)(nd_rows.length/sizeof(SaveDlgRow)) : nd_button_count;
-        nd_selected=(int)fmax(0,fmin(count-1,nd_selected+move));
+        const int count=nd_kind==ND_SAVE_LIST ? (int)nd_save_indices.count : nd_button_count;
+        if (nd_kind==ND_SAVE_LIST && count) {
+            NSUInteger current=[nd_save_indices indexOfObject:@(nd_selected)];
+            const int next=(int)fmax(0,fmin(count-1,(current==NSNotFound ? 0 : (int)current)+move));
+            nd_selected=[nd_save_indices[next] intValue];
+        } else nd_selected=(int)fmax(0,fmin(count-1,nd_selected+move));
         if(nd_kind==ND_SAVE_LIST && count) {
             nd_focus_save(nd_selected, YES);
+        } else if (nd_alert) {
+            if (nd_selected >= 0 && nd_selected < (int)nd_alert.actions.count)
+                nd_alert.preferredAction=nd_alert.actions[nd_selected];
         } else for(int i=0;i<nd_button_count && i<3;i++) {
             nd_buttons[i].layer.borderWidth = i==nd_selected ? 2 : 0;
             nd_buttons[i].layer.borderColor = [UIColor systemBlueColor].CGColor;
             nd_buttons[i].layer.cornerRadius = 24;
         }
-        if (nd_kind != ND_SAVE_LIST && nd_selected >= 0 && nd_selected < nd_button_count)
+        if (!nd_alert && nd_kind != ND_SAVE_LIST && nd_selected >= 0 && nd_selected < nd_button_count && nd_selected < 3)
             [nd_action_scroll scrollRectToVisible:nd_buttons[nd_selected].frame animated:!UIAccessibilityIsReduceMotionEnabled()];
     }
     if(back && nd_back!=ND_NO_BACK) nd_answer(nd_kind,nd_seq,nd_back);
-    else if(confirm && (nd_kind==ND_SAVE_LIST ? nd_rows.length>0 : nd_button_count>0)) nd_answer(nd_kind,nd_seq,nd_selected);
+    else if(confirm && (nd_kind==ND_SAVE_LIST ? nd_save_indices.count>0 : nd_button_count>0)) nd_answer(nd_kind,nd_seq,nd_selected);
     return move || confirm || back;
 }
 

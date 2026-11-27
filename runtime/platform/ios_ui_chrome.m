@@ -844,7 +844,7 @@ static void cfg_page_controls(void) {
 			settings_set_int("touch_look", to); settings_save();
 		});
 		r->detail = @"Drag to turn the camera directly. Disable for puzzles that need free screen drawing.";
-		cfg_slider("Look sensitivity", 30, 300, (float)(settings_float("touch_sens", 1.0) * 100.0), 1, ^(double v) {
+		cfg_slider("Look sensitivity", 30, 1000, (float)(settings_float("touch_sens", 4.0) * 100.0), 1, ^(double v) {
 			settings_set_float("touch_sens", v / 100.0); settings_save();
 		});
 	}

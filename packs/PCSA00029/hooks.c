@@ -1204,3 +1204,9 @@ void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 	uc_mx = uc_my = 0; uc_age = 0;
 	if (getenv("RECOMP_YAW_DIAG")) { static int n; if (n++ % 20 == 0) fprintf(stderr, "uc_look_velocity: cam %#x v %.4f %.4f\n", cam, vx, vy); }
 }
+/* fn_810ee968's player-controller update, after the owned-object and eligibility
+ * checks at 0x810ee974/0x810ee982. Main-menu screens do not reach this body. */
+void recomp_ihook_uc_gameplay_touch(Cpu *c, int reg) {
+    (void)c; (void)reg;
+    window_touch_gameplay_tick();
+}

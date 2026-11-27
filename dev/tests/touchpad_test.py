@@ -39,9 +39,9 @@ enum { SELECT=1, START=8, LTRIG=0x100, RTRIG=0x200, TRIANGLE=0x1000, CIRCLE=0x20
        L1=0x400, R1=0x800, L3=2, R3=4, PAD_L2=0x10000, PAD_R2=0x20000 };
 static const char *keys[] = {"touchpad", "touchpad_scale", "touchpad_left", "touchpad_opacity", "touchpad_rstick", "touch_look"};
 static int values[] = {1,100,0,42,1,0};
-static float touch_sens=1;
+static float touch_sens=-1;
 static int key_index(const char *key) { for (int i=0;i<6;i++) if (!strcmp(key,keys[i])) return i; return -1; }
-static double settings_float(const char *key,double fallback) { return !strcmp(key,"touch_sens") ? touch_sens : fallback; }
+static double settings_float(const char *key,double fallback) { return !strcmp(key,"touch_sens") && touch_sens>=0 ? touch_sens : fallback; }
 static int settings_has(const char *key) { return key_index(key)>=0; }
 static int settings_int(const char *key,int fallback) { int i=key_index(key); return i<0?fallback:values[i]; }
 static void settings_set_int(const char *key,int value) { int i=key_index(key); assert(i>=0); values[i]=value; }
@@ -250,6 +250,8 @@ static float drag_total(int samples,int read_every) {
 }
 static void direct_look(void) {
     setenv("RECOMP_TOUCH_LOOK","1",1); values[5]=1; clock_ns+=1000000000;
+    assert(tl_sens()==4); /* new installs start at 400%; saved choices remain intact */
+    touch_sens=1; clock_ns+=1000000000;
     touchpad_cancel_all(); touchpad_layout_for(932,430);
     SDL_Event e=start_look(80); float dx,dy;
     st_down[0]=1; st_id[0]=80; hold_st[0]=1;
@@ -277,6 +279,8 @@ static void direct_look(void) {
     close_to(drag_total(120,4),0.2f*3.14159265f); /* 30 camera samples/s */
     close_to(drag_total(4,4),0.2f*3.14159265f);   /* sparse/coalesced events, consumed after lift */
     touch_sens=2; clock_ns+=1000000000; close_to(drag_total(60,2),0.4f*3.14159265f);
+    touch_sens=10; clock_ns+=1000000000; close_to(drag_total(60,2),2.0f*3.14159265f);
+    touch_sens=20; clock_ns+=1000000000; assert(tl_sens()==10);
     touch_sens=1; clock_ns+=1000000000;
     e=start_look(82); e.type=SDL_EVENT_FINGER_MOTION; e.tfinger.x=0.7f; assert(tp_zone_hold(&e));
     e.type=SDL_EVENT_FINGER_CANCELED; assert(touchpad_event(&e)); assert(!window_touch_look_delta(&dx,&dy));
@@ -350,7 +354,26 @@ static void camera_hook(void) {
     close_to(guest_float(0x760),0.006f); close_to(guest_float(0x764),0.003f);
     puts("PASS: production Uncharted touch-to-camera hooks preserve exact yaw/pitch and retain desktop mouse scaling/invert");
 }
-int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); return 0; }
+static void game_menu_routing(void) {
+    touchpad_cancel_all(); setenv("RECOMP_TOUCH_GAMEPLAY_GATE","1",1);
+    assert(!tl_gameplay_allowed());
+    SDL_Event e=start_look(101); e.type=SDL_EVENT_FINGER_MOTION; e.tfinger.x=0.8f;
+    assert(!touchpad_event(&e) && !tp_zone_hold(&e) && !tl_active);
+    e=finger(SDL_EVENT_FINGER_DOWN,102,0.2f,0.7f); assert(!tp_zone_hold(&e));
+    e.type=SDL_EVENT_FINGER_MOTION; e.tfinger.x=0.3f;
+    assert(!touchpad_event(&e) && !tp_zone_hold(&e));
+    clock_ns+=200000000; tp_zone_tick(); assert(!tv.sl_active && !tl_active);
+    Cpu c={0}; recomp_ihook_uc_gameplay_touch(&c,0); assert(tl_gameplay_allowed());
+    e=start_look(103); e.type=SDL_EVENT_FINGER_MOTION; e.tfinger.x=0.7f;
+    assert(tp_zone_hold(&e) && tl_active);
+    touchpad_native_press(10); assert(tp_bits&TRIANGLE);
+    clock_ns+=100000001; tp_zone_tick();
+    assert(!tl_active && !tv.sl_active && (tp_bits&TRIANGLE));
+    float dx=1,dy=1; assert(!window_touch_look_delta(&dx,&dy) && dx==0 && dy==0);
+    touchpad_native_release(10); unsetenv("RECOMP_TOUCH_GAMEPLAY_GATE");
+    puts("PASS: main-menu swipes remain raw touches; eligible player updates enable gameplay controls; expiry releases sticks without clearing menu buttons");
+}
+int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); game_menu_routing(); return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='nativ-touchpad-') as folder:
     source = Path(folder) / 'test.c'
@@ -361,6 +384,6 @@ with tempfile.TemporaryDirectory(prefix='nativ-touchpad-') as folder:
                str(source), '-lm', '-pthread', '-o', str(binary)]
     subprocess.run(command, check=True)
     test_env = os.environ.copy()
-    for key in ('RECOMP_TOUCHPAD', 'RECOMP_TOUCHPAD_RSTICK', 'RECOMP_STICK_HOLD', 'RECOMP_STICK_DRAG', 'RECOMP_TOUCH_LOOK', 'RECOMP_YAW_DIAG'):
+    for key in ('RECOMP_TOUCHPAD', 'RECOMP_TOUCHPAD_RSTICK', 'RECOMP_STICK_HOLD', 'RECOMP_STICK_DRAG', 'RECOMP_TOUCH_LOOK', 'RECOMP_TOUCH_GAMEPLAY_GATE', 'RECOMP_YAW_DIAG'):
         test_env.pop(key, None)
     subprocess.run([str(binary)], check=True, env=test_env)

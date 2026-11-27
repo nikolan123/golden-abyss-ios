@@ -981,6 +981,17 @@ static uint8_t tp_stick[4] = { 128, 128, 128, 128 };
 static uint64_t tl_pending;
 static int tl_active;                     /* UI-thread ownership, independent of pending motion */
 static float tl_lx, tl_ly;
+static uint64_t tl_gameplay_at;
+void window_touch_gameplay_tick(void) {
+    __atomic_store_n(&tl_gameplay_at, SDL_GetTicksNS()+1, __ATOMIC_RELEASE);
+}
+static int tl_gameplay_allowed(void) {
+    const char *gate = getenv("RECOMP_TOUCH_GAMEPLAY_GATE");
+    if (!gate || !*gate || *gate=='0') return 1;
+    const uint64_t at = __atomic_load_n(&tl_gameplay_at, __ATOMIC_ACQUIRE);
+    return at && SDL_GetTicksNS()+1-at < 100000000ull;
+}
+static void tp_stop_sticks(void);
 static int tl_want(void) {
 	static int v = -1; static uint64_t at; const uint64_t t = now_us();
 	if (v < 0 || t - at > 500000) {
@@ -992,7 +1003,7 @@ static int tl_want(void) {
 }
 static float tl_sens(void) {
 	static float s = -1; static uint64_t at; const uint64_t t = now_us();
-	if (s < 0 || t - at > 500000) { at = t; s = (float)settings_float("touch_sens", 1.0); if (!(s > 0.3f)) s = 0.3f; if (s > 3) s = 3; }
+	if (s < 0 || t - at > 500000) { at = t; s = (float)settings_float("touch_sens", 4.0); if (!(s > 0.3f)) s = 0.3f; if (s > 10) s = 10; }
 	return s;
 }
 static void tl_cancel(void) {
@@ -1004,9 +1015,9 @@ static void tl_move(float x, float y) {
 	const float dx = (x - tl_lx) * scale, dy = (y - tl_ly) * scale;
 	tl_lx = x; tl_ly = y;
 	if (!isfinite(dx) || !isfinite(dy)) return;
-	const int limit = 4 * (1 << 20);
-	const int ix = (int)lroundf(fmaxf(-4, fminf(4, dx)) * (1 << 20));
-	const int iy = (int)lroundf(fmaxf(-4, fminf(4, dy)) * (1 << 20));
+	const int limit = 16 * (1 << 20);
+	const int ix = (int)lroundf(fmaxf(-16, fminf(16, dx)) * (1 << 20));
+	const int iy = (int)lroundf(fmaxf(-16, fminf(16, dy)) * (1 << 20));
 	uint64_t old = __atomic_load_n(&tl_pending, __ATOMIC_RELAXED);
 	for (;;) {
 		int64_t nx = (int32_t)(uint32_t)old + (int64_t)ix;
@@ -1022,7 +1033,7 @@ static void tl_move(float x, float y) {
 int window_touch_look_delta(float *dx, float *dy) {
 	const uint64_t motion = __atomic_exchange_n(&tl_pending, 0, __ATOMIC_ACQ_REL);
 	*dx = *dy = 0;
-	if (!__atomic_load_n(&input_focused, __ATOMIC_ACQUIRE) || overlay_is_open() || overlay_dialog_active()) return 0;
+    if (!__atomic_load_n(&input_focused, __ATOMIC_ACQUIRE) || overlay_is_open() || overlay_dialog_active() || !tl_gameplay_allowed()) return 0;
 	/* At sensitivity 1 a full-width swipe turns 180 degrees, at either frame rate. */
 	const float radians = 3.14159265358979323846f / (1 << 20);
 	*dx = (int32_t)(uint32_t)motion * radians;
@@ -1141,6 +1152,7 @@ static struct { SDL_FingerID id; float x, y, last_x, last_y; double at; int zone
 static void tp_apply_stick(int which, float x, float y, float bx, float by, float reach, uint8_t *ox, uint8_t *oy);
 static int tp_zone_of(float x, float y) {
 	if (!tv.on || !tv.w) return 0;
+    if (!tl_gameplay_allowed()) return 0; /* game menus keep their complete screen gestures */
 	if (rb_held) return 0;   /* a rear touch (RB held as it lands) is the game's own, never a stick or a look */
 	const int lower = y >= tv.h * 0.50f;
 	if (lower && (tv.mirror ? (x > tv.w * 0.58f) : (x < tv.w * 0.42f))) return 1;   /* the movement stick's pocket */
@@ -1151,7 +1163,7 @@ static int tp_zone_of(float x, float y) {
 }
 static double tp_now(void) { return (double)SDL_GetTicksNS() / 1e9 + 1e-9; }   /* (0 never happened: a finger landed at 0 once) */
 static int tp_zone_hold(const SDL_Event *e) {
-	if (overlay_is_open() || overlay_dialog_active()) return 0;   /* the menu's own taps and drags never become sticks */
+    if (overlay_is_open() || overlay_dialog_active() || !tl_gameplay_allowed()) return 0;
 	const float x = e->tfinger.x * tv.w, y = e->tfinger.y * tv.h;
 	int k = -1;
 	for (int i = 0; i < 10; i++) if (zwait[i].id == e->tfinger.fingerID) { k = i; break; }
@@ -1215,6 +1227,7 @@ static int tp_zone_hold(const SDL_Event *e) {
 /* A stationary thumb sends no motion events; holding must still create its stick. */
 static void tp_zone_tick(void) {
     if (!tv.on || !tv.w || overlay_is_open() || overlay_dialog_active()) return;
+    if (!tl_gameplay_allowed()) { tp_stop_sticks(); return; }
     if (!window_touchpad_rstick() && !tl_want()) for (int i = 0; i < 10; i++) if (zwait[i].zone == 2) memset(&zwait[i], 0, sizeof zwait[i]);
     for (int i = 0; i < 10; i++) if (zwait[i].id && zwait[i].zone != 3) {
         SDL_Event e = {0}; e.type = SDL_EVENT_FINGER_MOTION;
@@ -1240,6 +1253,13 @@ static void tp_release(int which) {
 	else if (which == 2) { tv.sr_active = 0; tv.sr_kx = tv.sr_x; tv.sr_ky = tv.sr_y; tp_stick[2] = tp_stick[3] = 128; }
 	else if (which == 3) tl_active = 0; /* normal lift preserves motion not yet sampled by the game */
 	tp_publish();
+}
+static void tp_stop_sticks(void) {
+    for (int i=0;i<10;i++) if (tpf[i].id && tpf[i].which>=1 && tpf[i].which<=3) {
+        tp_release(tpf[i].which); memset(&tpf[i],0,sizeof tpf[i]);
+    }
+    memset(zwait,0,sizeof zwait); tl_cancel();
+    tp_publish();
 }
 
 static void tp_clear(void) {
@@ -1285,6 +1305,7 @@ void touchpad_native_release(int which) {
 }
 static int touchpad_event(const SDL_Event *e) {
 	if (!tv.on || !tv.w) return 0;
+    if (!tl_gameplay_allowed()) tp_stop_sticks();
 	if (overlay_is_open()) { if (e->type == SDL_EVENT_FINGER_DOWN) tp_clear(); return 0; }   /* the menu's own taps */
 	const float x = e->tfinger.x * tv.w, y = e->tfinger.y * tv.h;
 	int slot = -1;
