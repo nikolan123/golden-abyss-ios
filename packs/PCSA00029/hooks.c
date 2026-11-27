@@ -1126,7 +1126,7 @@ void recomp_ihook_uc_zone_done(Cpu *c, int reg) {
 	}
 }
 
-/* Uncharted's mouse look (keyboard + mouse, window.c; F8 / window_raw_look, off by default -- while off this
+/* Uncharted's direct camera input (mouse and touch, window.c; F8 / window_raw_look controls the mouse -- while off this
  * never takes the mouse, which then drives window.c's right-stick stand-in).
  * fn_81269416 (r6: the pad block, input object +0x1c, the object at *0x819053d8) reads the pad and, per
  * stick, turns the bytes into floats, curves them through its dead zone (fn_81269228: the right stick's
@@ -1137,7 +1137,9 @@ void recomp_ihook_uc_zone_done(Cpu *c, int reg) {
  * controller) never reached it (found in testing, 2026-10-10). This hook is the instruction after the
  * right stick's curve: the mouse's counts this frame join the curved value there, so the flag, the
  * direction buttons and the events all carry it. Linear in counts (no dead zone, no curve, no easing of
- * ours); the camera still turns at its own rate for a deflection. */
+ * ours). The camera-velocity hook below replaces that direction's turn with
+ * the exact mouse/touch displacement in radians. Touch remains independent of
+ * the mouse's capture, sensitivity, invert and raw-look preference. */
 int window_mouse_delta(float *dx, float *dy); float window_mouse_sens(void); int window_mouse_invert(void); int window_raw_look(void);
 /* RECOMP_YAW_DIAG=1: twice a second, the active camera (DAT_81905310's camera manager: **(mgr+0x5c)+8 when
  * mgr+0x60, the camera FUN_81040eda returns) and every float of its first 0x400 bytes that changed since
@@ -1159,15 +1161,21 @@ static void uc_camera_diag(void) {
 	last_cam = cam;
 	fprintf(stderr, "%s\n", line);
 }
-static float uc_mx, uc_my; static int uc_age;   /* the mouse counts not yet turned (uc_mouse_look adds, uc_look_velocity spends; dropped if no camera takes them within a few frames: a cutscene) */
+static float uc_mx, uc_my; static int uc_age;   /* pending radians; discarded if no camera consumes them within a few frames */
 void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
 	(void)reg;
 	static int diag = -1; if (diag < 0) diag = getenv("RECOMP_YAW_DIAG") != 0;
 	if (diag) uc_camera_diag();
 	if (uc_age++ > 3) uc_mx = uc_my = 0;
-	if (!window_raw_look()) return;
 	float dx = 0, dy = 0;
-	window_mouse_delta(&dx, &dy);
+	window_touch_look_delta(&dx, &dy);
+	if (window_raw_look()) {
+		float mx = 0, my = 0;
+		window_mouse_delta(&mx, &my);
+		const float k = window_mouse_sens() * 0.0015f;
+		dx += mx * k;
+		dy += my * k * (window_mouse_invert() ? -1.0f : 1.0f);
+	}
 	if (dx == 0 && dy == 0) return;
 	uint32_t pad = c->r[6];
 	if (!pad) return;
@@ -1175,23 +1183,22 @@ void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
 	 * direction -- one speed for any deflection, found in testing 2026-10-10) sets its turn velocity
 	 * (FUN_8106677e, uc_look_velocity below), which then gets the mouse's exact amount. Here the stick only
 	 * has to point the mouse's way, past any dead zone, for the message to be sent at all. */
-	const float inv = window_mouse_invert() ? -1.0f : 1.0f;
-	uc_mx += dx; uc_my += dy * inv;
+	if (uc_mx == 0 && uc_my == 0) uc_age = 0;
+	uc_mx += dx; uc_my += dy;
 	float x, y; uint32_t bx = RD32(pad + 0x354), by = RD32(pad + 0x358); memcpy(&x, &bx, 4); memcpy(&y, &by, 4);
-	if (fabsf(dx) >= fabsf(dy)) x = dx > 0 ? 0.6f : -0.6f; else y = dy * inv > 0 ? 0.6f : -0.6f;
+	if (fabsf(dx) >= fabsf(dy)) x = dx > 0 ? 0.6f : -0.6f; else y = dy > 0 ? 0.6f : -0.6f;
 	memcpy(&bx, &x, 4); memcpy(&by, &y, 4); WR32(pad + 0x354, bx); WR32(pad + 0x358, by);
 	if (diag) { static int n; if (n++ % 20 == 0) fprintf(stderr, "uc_mouse_look: dx=%g dy=%g\n", dx, dy); }
 }
 
 /* Uncharted's camera, just after its "set look velocity" (FUN_8106677e, the camera's vtable +0x18c; r0 the
  * camera) stored the message's direction times its turn speeds at +0x160/+0x164 (radians a frame, about
- * 0.075 at full tilt): on a frame the mouse moved, the turn is the mouse's instead -- linear in the counts,
- * about 0.0015 rad (0.086 degrees) a count at sensitivity 1, any speed */
+ * 0.075 at full tilt): direct input replaces the turn with its pending radians.
+ * Mouse counts are scaled at input time; touch has its own screen-width scale. */
 void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 	(void)reg;
 	if (uc_mx == 0 && uc_my == 0) return;
-	const float k = window_mouse_sens() * 0.0015f;
-	float vx = uc_mx * k, vy = uc_my * k; uint32_t bx, by; memcpy(&bx, &vx, 4); memcpy(&by, &vy, 4);
+	float vx = uc_mx, vy = uc_my; uint32_t bx, by; memcpy(&bx, &vx, 4); memcpy(&by, &vy, 4);
 	uint32_t cam = c->r[0];
 	WR32(cam + 0x160, bx); WR32(cam + 0x164, by);
 	uc_mx = uc_my = 0; uc_age = 0;

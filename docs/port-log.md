@@ -746,3 +746,18 @@ remaining physical-device checks.
   "Second stick" toggle governs. The overlay's menus and the game's
   taps are untouched: the zone path refuses to run while any menu is
   open.
+
+### Step 51 — test44 direct touch-camera displacement
+
+Replaced the velocity-filtered right-stick emulation from test43 with direct
+camera displacement through Uncharted's existing camera hooks. Look gestures
+use a 3-point movement threshold, preserve the initial and final movement, and
+have no smoothing timer or start haptic. A resting look finger retains ownership
+without turning; a second finger cannot take over it. Movement, button, rear
+touch and known swipe/twist-prompt routing remain separate.
+
+Touch sensitivity is independent of mouse preferences. The production input and
+camera hooks are exercised together under sanitizers, including matching turns
+at 30/60 fps and 100,000 concurrent direct-look updates. The existing touch/pad
+regressions and iOS build pass. See `docs/ios-touch-look-test44.md` for the cause,
+behavior, validation and remaining device checks.
