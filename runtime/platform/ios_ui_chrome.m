@@ -67,8 +67,7 @@ int ios_ui_chrome_pad_on(void) { return g_installed; }
 
 int ios_ui_chrome_active(void) { return g_installed; }
 
-/* the session log tells the story of a phone from a thousand miles away: every state flip and
- * every tap of the chrome says itself here, stderr into the same log the game writes */
+/* Lifecycle and input diagnostics share the game session log. */
 static void chrome_log(const char *fmt, ...) {
 	va_list ap; va_start(ap, fmt);
 	vfprintf(stderr, fmt, ap);
@@ -160,6 +159,18 @@ static UIImage *glyph(NSString *kind, CGFloat w, CGFloat h, UIColor *stroke) {
 	[r release];
 	return im;
 }
+static void chrome_chip(UIButton *button, UIImage *image) {
+    UIButtonConfiguration *style;
+    if (@available(iOS 26.0, *)) style = [UIButtonConfiguration glassButtonConfiguration];
+    else style = [UIButtonConfiguration tintedButtonConfiguration];
+    style.image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    style.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    style.contentInsets = NSDirectionalEdgeInsetsMake(4,8,4,8);
+    style.baseForegroundColor = [UIColor whiteColor];
+    style.baseBackgroundColor = [UIColor secondarySystemFillColor];
+    button.configuration = style;
+    button.backgroundColor = [UIColor clearColor]; button.layer.borderWidth = 0;
+}
 static void eye_look(void) {
 	const int on = touchpad_on();
 	if (on == g_eye_on) return;
@@ -170,11 +181,11 @@ static void eye_look(void) {
     g_eye.accessibilityLabel = on ? @"Hide on-screen controls" : @"Show on-screen controls";
     g_eye.accessibilityValue = on ? @"On" : @"Off";
     g_eye.selected = on != 0;
-	g_eye.backgroundColor = [UIColor colorWithWhite:0.13f alpha:(on ? 0.72f : 0.52f)];
+	chrome_chip(g_eye, img);
 }
 
 /* ---- the pad: UIKit's own buttons, and the picture drawn ---------------------------------- */
-static int bar_visible(void);   /* the native strip's own state, asked by the pad's gates below */
+static int bar_visible(void);   /* the system quick menu's state, shared by input and artwork */
 /* Native touch areas and artwork use the same completed TpVisual, in window points. */
 @interface PadBtn : UIView {
  @public
@@ -557,29 +568,25 @@ static void intro_tick(void) {
     g_intro_view.hidden = NO;
 }
 
-/* the settings center: the full menu as iOS's own settings look (Step 43) -- a real navigation bar
- * with Done, a real segmented control for the five pages, and a real UITableView (inset-grouped, the
- * Settings app's own style) fed by CfgRow models; every row drives the same handle the ImGui page
- * drove, no new state. The card is a blur material, the amber is the tint, the controls are the
- * system's own switch / slider / segmented -- nothing hand-drawn except the glyphs the system can't
- * give us here. */
+/* Grouped settings categories with native Back navigation and option-list sheets. */
 static UIView *g_cfg_dim;         /* the dim over the game: a tap is Done */
 static UIView *g_cfg_card;        /* the card: a blur material, rounded, masked */
 static UINavigationBar *g_cfg_nav;
-static UISegmentedControl *g_cfg_segs;
 static UITableView *g_cfg_tbl;
 static NSMutableArray *g_cfg_rows;   /* the open page's CfgRow models */
-static int g_cfg_page = -1;         /* the open page (-1: closed) */
-static int g_cfg_last_page;
-static UIAlertController *g_cfg_picker; /* owned until choice, cancellation or settings close */
+static NSMutableArray *g_cfg_sections;
+static int g_cfg_page = -1;         /* -2 home, -1 closed, 0..4 detail page */
+static BOOL g_cfg_visible;
+static NSUInteger g_cfg_presentation;
+static UIViewController *g_cfg_picker; /* owned until choice, cancellation or settings close */
 @class CfgCenter;
 static CfgCenter *g_cfg_center;
-static void cfg_picker_finished(UIAlertController *picker) {
+static void cfg_picker_finished(UIViewController *picker) {
     if (g_cfg_picker != picker) return;
     g_cfg_picker = nil; [picker release];
 }
 static void cfg_picker_dismiss(void) {
-    UIAlertController *picker = g_cfg_picker;
+    UIViewController *picker = g_cfg_picker;
     if (!picker) return;
     [picker dismissViewControllerAnimated:NO completion:nil];
     cfg_picker_finished(picker);
@@ -598,8 +605,19 @@ static UIVisualEffectView *blur_fill(UIView *host, UIBlurEffectStyle st) {
 	v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	v.userInteractionEnabled = NO;
 	[host addSubview:v];
+	v.tag = 9046;
 	[v release];
 	return v;
+}
+static void chrome_refresh_materials(UIView *host) {
+    if ([host isKindOfClass:[UIVisualEffectView class]] && host.tag == 9046) {
+        UIVisualEffectView *view = (UIVisualEffectView *)host;
+        UIVisualEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark];
+        if (@available(iOS 26.0, *)) effect = [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+        view.effect = UIAccessibilityIsReduceTransparencyEnabled() ? nil : effect;
+        view.backgroundColor = UIAccessibilityIsReduceTransparencyEnabled() ? [UIColor secondarySystemGroupedBackgroundColor] : [UIColor clearColor];
+    }
+    for (UIView *child in host.subviews) chrome_refresh_materials(child);
 }
 static NSTimeInterval chrome_duration(NSTimeInterval seconds) {
     return UIAccessibilityIsReduceMotionEnabled() ? 0 : seconds;
@@ -620,7 +638,7 @@ static UIButtonConfiguration *chrome_button_style(NSString *title, BOOL prominen
 enum { R_HEAD = 0, R_SWITCH, R_SEG, R_SLIDER, R_BUTTON, R_NOTE, R_PAIR, R_TEXT };
 @interface CfgRow : NSObject {
 @public
-	NSString *title, *detail, *right;
+	NSString *title, *detail, *right, *icon;
 	NSArray *seg;
 	int kind, sel, on, integral;
 	float vmin, vmax, val;
@@ -632,7 +650,7 @@ enum { R_HEAD = 0, R_SWITCH, R_SEG, R_SLIDER, R_BUTTON, R_NOTE, R_PAIR, R_TEXT }
 @end
 @implementation CfgRow
 - (void)dealloc {
-	[title release]; [detail release]; [right release]; [seg release];
+	[title release]; [detail release]; [right release]; [icon release]; [seg release];
 	[act release]; [num release]; [pick release]; [flip release];
 	[super dealloc];
 }
@@ -860,7 +878,7 @@ static void cfg_page_help(void) {
 	cfg_head("The controls");
 	cfg_note("Hold or drag the lower left for the movement stick, or the lower right for the camera stick. A quick tap still touches the game. Left-handed mode swaps the sides.");
 	cfg_note("The picture itself is the Vita's touch screen: tap and drag it as you would the real thing.");
-	cfg_note("Tap the gear below the eye for the quick menu. Game > All settings opens these pages and pauses the game. Done resumes play.");
+	cfg_note("Tap the gear below the eye for the quick menu. Settings pauses the game; choose a category, then use Settings to go back or Done to resume.");
 	cfg_head("About");
 	{
 		CfgRow *r = cfg_row(R_TEXT);
@@ -871,6 +889,8 @@ static void cfg_page_help(void) {
 }
 
 static void cfg_close(void);
+static void cfg_rebuild(void);
+static void cfg_hide(void);
 
 static CGFloat text_height(NSString *text, CGFloat width, UIFont *font) {
     if (!text.length) return 0;
@@ -879,16 +899,23 @@ static CGFloat text_height(NSString *text, CGFloat width, UIFont *font) {
         attributes:@{NSFontAttributeName:font} context:nil].size.height);
 }
 static CGFloat cfg_height(CfgRow *row, CGFloat width) {
-    const CGFloat inner = fmax(80, width - 32);
-    const CGFloat titleWidth = row->kind == R_SWITCH ? inner - 64 : row->kind == R_PAIR ? inner * 0.52 : inner;
-    const CGFloat title = text_height(row->title, titleWidth, [UIFont systemFontOfSize:15]);
-    const CGFloat detail = text_height(row->detail, titleWidth, [UIFont systemFontOfSize:12]);
+    const CGFloat inner = fmax(80, width - 32 - (row->icon ? 44 : 0));
+    const BOOL choice = row->kind == R_SEG && row->seg.count > 5;
+    const CGFloat titleWidth = row->kind == R_SWITCH ? inner - 64 : row->kind == R_PAIR || choice ? inner * 0.52 : row->kind == R_SLIDER ? inner - 80 : inner;
+    const CGFloat title = text_height(row->title, titleWidth, [UIFont preferredFontForTextStyle:UIFontTextStyleBody]);
+    const CGFloat detail = text_height(row->detail, titleWidth, [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]);
     if (row->kind == R_HEAD) return 36;
     if (row->kind == R_NOTE) return fmax(44, text_height(row->title, inner, [UIFont systemFontOfSize:13]) + 24);
-    if (row->kind == R_PAIR) return fmax(48, fmax(title, text_height(row->right, inner * 0.45, [UIFont systemFontOfSize:13])) + 24);
+    if (row->kind == R_PAIR) return fmax(48, fmax(title, text_height(row->right, inner * 0.45, [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline])) + 24);
+    if (choice) {
+        const NSInteger selected = row->sel >= 0 && row->sel < (int)row->seg.count ? row->sel : 0;
+        return fmax(54, fmax(title + (detail ? detail + 4 : 0), text_height(row->seg[selected], inner * 0.45, [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline])) + 24);
+    }
     return fmax(row->kind == R_SWITCH ? 56 : 48, 24 + title + (detail ? detail + 4 : 0) +
-        ((row->kind == R_SEG || row->kind == R_SLIDER) ? 42 : 0));
+        (((row->kind == R_SEG && !choice) || row->kind == R_SLIDER) ? 42 : 0));
 }
+
+#include "ios_ui_choices.inc"
 
 /* A reused cell owns its model and its control. No global target list, dangling FPS label,
  * stacked sliders, stale model values, or frames guessed before UITableView lays out the cell. */
@@ -896,6 +923,7 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
 @public
     CfgRow *model;
     UILabel *name, *note, *value;
+    UIImageView *symbol;
     UIControl *control;
 }
 - (void)configure:(CfgRow *)row;
@@ -905,9 +933,12 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
     self = [super initWithStyle:style reuseIdentifier:identifier];
     if (self) {
         name = [[UILabel alloc] init]; note = [[UILabel alloc] init]; value = [[UILabel alloc] init];
+        symbol = [[UIImageView alloc] init]; symbol.contentMode = UIViewContentModeScaleAspectFit;
+        symbol.tintColor = [UIColor systemBlueColor]; [self.contentView addSubview:symbol]; [symbol release];
         name.numberOfLines = note.numberOfLines = value.numberOfLines = 0;
-        note.font = [UIFont systemFontOfSize:12]; note.textColor = [UIColor secondaryLabelColor];
-        value.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+        note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]; note.textColor = [UIColor secondaryLabelColor];
+        name.adjustsFontForContentSizeCategory = note.adjustsFontForContentSizeCategory = value.adjustsFontForContentSizeCategory = YES;
+        value.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
         value.textColor = [UIColor secondaryLabelColor]; value.textAlignment = NSTextAlignmentRight;
         [self.contentView addSubview:name]; [self.contentView addSubview:note]; [self.contentView addSubview:value];
         [name release]; [note release]; [value release];
@@ -919,6 +950,7 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
     return model->integral ? [NSString stringWithFormat:@"%.0f%%", model->val] : [NSString stringWithFormat:@"%.2fx", model->val];
 }
 - (void)changed:(UIControl *)sender {
+    if (!g_cfg_visible || sender != control || !model || ![g_cfg_rows containsObject:model]) return;
     if (model->kind == R_SWITCH) {
         model->on = ((UISwitch *)sender).on; ios_ui_haptic(0);
         if (model->flip) model->flip(model->on);
@@ -932,45 +964,26 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
     }
 }
 - (void)commit:(UISlider *)slider {
+    if (!g_cfg_visible || slider != control || !model || ![g_cfg_rows containsObject:model]) return;
     [self changed:slider];
     if (model->num) model->num(model->val);
 }
-- (void)choose:(UIButton *)button {
-    if (g_cfg_picker || g_win.rootViewController.presentedViewController || !overlay_native_settings_wanted()) return;
-    CfgRow *row = model;
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:row->title message:row->detail preferredStyle:UIAlertControllerStyleActionSheet];
-    g_cfg_picker = [sheet retain];
-    __block UIAlertController *weakSheet = sheet; /* no ARC: do not create sheet -> action -> sheet ownership */
-    for (NSUInteger i = 0; i < row->seg.count; i++) {
-        const int index = (int)i;
-        [sheet addAction:[UIAlertAction actionWithTitle:row->seg[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            (void)action;
-            if (g_cfg_picker == weakSheet && overlay_native_settings_wanted() && [g_cfg_rows containsObject:row]) {
-                row->sel = index; if (row->pick) row->pick(index);
-                [button setTitle:row->seg[index] forState:UIControlStateNormal];
-            }
-            cfg_picker_finished(weakSheet);
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-        (void)action; cfg_picker_finished(weakSheet);
-    }]];
-    sheet.popoverPresentationController.sourceView = button;
-    sheet.popoverPresentationController.sourceRect = button.bounds;
-    [g_win.rootViewController presentViewController:sheet animated:YES completion:nil];
-    sheet.presentationController.delegate = (id<UIAdaptivePresentationControllerDelegate>)g_cfg_center;
-}
+- (void)choose:(UIButton *)button { (void)button; cfg_choose(model); }
 
 - (void)configure:(CfgRow *)row {
     [control removeFromSuperview]; control = nil;
     [row retain]; [model release]; model = row;
     name.text = row->title; note.text = row->detail; value.text = nil;
-    name.font = [UIFont systemFontOfSize:row->kind == R_HEAD ? 13 : row->kind == R_NOTE ? 13 : 15
-        weight:row->kind == R_HEAD || row->kind == R_TEXT ? UIFontWeightSemibold : UIFontWeightRegular];
+    name.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    symbol.image = row->icon ? [UIImage systemImageNamed:row->icon] : nil;
+    symbol.hidden = !row->icon;
     name.textColor = row->kind == R_HEAD ? [UIColor systemBlueColor] : row->kind == R_NOTE ? [UIColor secondaryLabelColor] : [UIColor labelColor];
-    self.selectionStyle = row->kind == R_BUTTON ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+    const BOOL choiceRow = row->kind == R_SEG && row->seg.count > 5;
+    self.selectionStyle = row->kind == R_BUTTON || choiceRow ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
     self.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
-    self.accessoryType = row->kind == R_BUTTON ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    self.accessoryType = row->icon || choiceRow ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    if (row->kind == R_BUTTON && !row->icon) name.textColor = [UIColor systemBlueColor];
     if (row->kind == R_SWITCH) {
         UISwitch *toggle = [[[UISwitch alloc] init] autorelease];
         toggle.on = row->on; toggle.onTintColor = [UIColor systemBlueColor]; control = toggle;
@@ -978,15 +991,11 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
         UISegmentedControl *segments = [[[UISegmentedControl alloc] initWithItems:row->seg] autorelease];
         segments.selectedSegmentIndex = row->sel >= 0 && row->sel < (int)row->seg.count ? row->sel : UISegmentedControlNoSegment;
         segments.selectedSegmentTintColor = [UIColor systemBlueColor];
-        [segments setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor blackColor]} forState:UIControlStateSelected];
+        [segments setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor whiteColor]} forState:UIControlStateSelected];
         control = segments;
     } else if (row->kind == R_SEG) {
-        UIButton *choice = [UIButton buttonWithType:UIButtonTypeSystem];
         const NSInteger selected = row->sel >= 0 && row->sel < (int)row->seg.count ? row->sel : 0;
-        [choice setTitle:row->seg[selected] forState:UIControlStateNormal];
-        choice.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-        [choice addTarget:self action:@selector(choose:) forControlEvents:UIControlEventTouchUpInside];
-        control = choice;
+        value.text = row->seg[selected];
     } else if (row->kind == R_SLIDER) {
         UISlider *slider = [[[UISlider alloc] init] autorelease];
         slider.minimumValue = row->vmin; slider.maximumValue = row->vmax; slider.value = row->val;
@@ -1004,15 +1013,17 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     if (!model) return;
-    const CGFloat width = self.contentView.bounds.size.width, inner = width - 32;
+    const CGFloat width = self.contentView.bounds.size.width, leading = model->icon ? 60 : 16, inner = width - leading - 16;
+    const BOOL choiceRow = model->kind == R_SEG && model->seg.count > 5;
     CGFloat titleWidth = inner;
     if (model->kind == R_SWITCH) titleWidth -= 64;
-    if (model->kind == R_PAIR) titleWidth *= 0.52;
+    if (model->kind == R_PAIR || choiceRow) titleWidth *= 0.52;
     if (model->kind == R_SLIDER) titleWidth -= 80;
     const CGFloat titleHeight = text_height(model->title, titleWidth, name.font);
-    name.frame = CGRectMake(16, 12, titleWidth, titleHeight);
+    symbol.frame = CGRectMake(20,(self.contentView.bounds.size.height-28)/2,28,28);
+    name.frame = CGRectMake(leading, 12, titleWidth, titleHeight);
     const CGFloat noteHeight = text_height(model->detail, titleWidth, note.font);
-    note.frame = CGRectMake(16, 16 + titleHeight, titleWidth, noteHeight);
+    note.frame = CGRectMake(leading, 16 + titleHeight, titleWidth, noteHeight);
     value.frame = CGRectZero;
     if (model->kind == R_SWITCH) control.frame = CGRectMake(width - 67, (self.contentView.bounds.size.height - 31) / 2, 51, 31);
     if (model->kind == R_SEG || model->kind == R_SLIDER) {
@@ -1020,12 +1031,19 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
         control.frame = CGRectMake(16, y, inner, 32);
     }
     if (model->kind == R_SLIDER) value.frame = CGRectMake(width - 92, 12, 76, titleHeight);
-    if (model->kind == R_PAIR) value.frame = CGRectMake(16 + inner * 0.55, 12, inner * 0.45,
+    if (model->kind == R_PAIR || choiceRow) value.frame = CGRectMake(leading + inner * 0.55, 12, inner * 0.45,
         fmax(titleHeight, text_height(value.text, inner * 0.45, value.font)));
 }
 @end
 
-@interface CfgCenter : NSObject <UITableViewDataSource, UITableViewDelegate, UIAdaptivePresentationControllerDelegate>
+static NSArray *cfg_section_rows(NSInteger section) {
+    return section >= 0 && section < (NSInteger)g_cfg_sections.count ? g_cfg_sections[section][@"rows"] : @[];
+}
+static CfgRow *cfg_model_at(NSIndexPath *path) {
+    NSArray *rows = cfg_section_rows(path.section);
+    return path.row >= 0 && path.row < (NSInteger)rows.count ? rows[path.row] : nil;
+}
+@interface CfgCenter : NSObject <UITableViewDataSource, UITableViewDelegate, UIAdaptivePresentationControllerDelegate, UINavigationBarDelegate>
 - (void)done;
 @end
 @implementation CfgCenter
@@ -1033,74 +1051,124 @@ static CGFloat cfg_height(CfgRow *row, CGFloat width) {
     if (presentation.presentedViewController == g_cfg_picker) cfg_picker_finished(g_cfg_picker);
 }
 - (void)done { ios_ui_haptic(0); cfg_close(); }
+- (BOOL)navigationBar:(UINavigationBar *)bar shouldPopItem:(UINavigationItem *)item {
+    (void)bar; (void)item;
+    dispatch_async(dispatch_get_main_queue(), ^{ if (g_cfg_visible) { g_cfg_page = -2; cfg_rebuild(); } });
+    return NO;
+}
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)table { (void)table; return g_cfg_sections.count; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
-    (void)table; (void)section; return g_cfg_rows.count;
+    (void)table; return cfg_section_rows(section).count;
+}
+- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
+    (void)table; return section >= 0 && section < (NSInteger)g_cfg_sections.count ? g_cfg_sections[section][@"header"] : nil;
+}
+- (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
+    (void)table; return section >= 0 && section < (NSInteger)g_cfg_sections.count ? g_cfg_sections[section][@"footer"] : nil;
 }
 - (CGFloat)tableView:(UITableView *)table heightForRowAtIndexPath:(NSIndexPath *)path {
-    return cfg_height(g_cfg_rows[path.row], table.bounds.size.width - 40);
+    CfgRow *row = cfg_model_at(path); return row ? cfg_height(row, table.bounds.size.width - 40) : 0;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     CfgCell *cell = [table dequeueReusableCellWithIdentifier:@"setting"];
     if (!cell) cell = [[[CfgCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"setting"] autorelease];
-    [cell configure:g_cfg_rows[path.row]];
+    CfgRow *row = cfg_model_at(path); if (row) [cell configure:row];
     return cell;
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
-    CfgRow *row = [g_cfg_rows[path.row] retain];
-    if (row->kind == R_BUTTON && row->act) { ios_ui_haptic(0); row->act(); }
-    [row release]; [table deselectRowAtIndexPath:path animated:YES];
+    CfgRow *row = [cfg_model_at(path) retain];
+    [table deselectRowAtIndexPath:path animated:YES];
+    if (row && row->kind == R_BUTTON && row->act) { ios_ui_haptic(0); row->act(); }
+    else if (row && row->kind == R_SEG && row->seg.count > 5) cfg_choose(row);
+    [row release];
 }
 @end
 
-static void cfg_close(void) {
-	cfg_picker_dismiss();
-	if (!g_cfg_dim) return;
-	g_cfg_dim.hidden = YES; g_cfg_card.hidden = YES;
-	g_cfg_page = -1;
-	overlay_close();   /* resumes, exactly the close the ImGui menu's Resume took */
+static void cfg_hide(void) {
+    cfg_picker_dismiss();
+    g_cfg_visible = NO; g_cfg_page = -1;
+    g_cfg_card.userInteractionEnabled = NO;
+    const NSUInteger presentation = ++g_cfg_presentation;
+    [UIView animateWithDuration:chrome_duration(0.18) delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        g_cfg_card.alpha = g_cfg_dim.alpha = 0;
+    } completion:^(BOOL finished) {
+        (void)finished;
+        if (presentation == g_cfg_presentation) g_cfg_card.hidden = g_cfg_dim.hidden = YES;
+    }];
 }
+static void cfg_close(void) { cfg_hide(); overlay_close(); }
 static void cfg_page_build(int tab) {
-	[g_cfg_rows removeAllObjects];
-	switch (tab) {
-	case 0: cfg_page_display(); break;
-	case 1: cfg_page_performance(); break;
-	case 2: cfg_page_game(); break;
-	case 3: cfg_page_controls(); break;
-	default: cfg_page_help(); break;
-	}
+    [g_cfg_rows removeAllObjects];
+    if (tab == -2) {
+        NSArray *details = @[@"Picture quality and upscaling", @"Live statistics and diagnostics", @"Frame rate, audio and game options", @"Touch controls, sensitivity and motion", @"Controls reference and help"];
+        NSArray *symbols = @[@"display", @"gauge.with.dots.needle.67percent", @"gamecontroller", @"hand.draw", @"questionmark.circle"];
+        for (int i = 0; i < 5; i++) {
+            const int page = i;
+            CfgRow *row = cfg_button(cfg_tab_names[i], ^{ g_cfg_page = page; cfg_rebuild(); });
+            row->detail = [details[i] copy]; row->icon = [symbols[i] copy];
+        }
+        return;
+    }
+    switch (tab) {
+    case 0: cfg_page_display(); break;
+    case 1: cfg_page_performance(); break;
+    case 2: cfg_page_game(); break;
+    case 3: cfg_page_controls(); break;
+    default: cfg_page_help(); break;
+    }
+}
+static void cfg_group_rows(void) {
+    [g_cfg_sections removeAllObjects];
+    NSMutableDictionary *section = nil;
+    for (CfgRow *row in g_cfg_rows) {
+        if (!section || row->kind == R_HEAD) {
+            section = [NSMutableDictionary dictionaryWithObjectsAndKeys:[NSMutableArray array], @"rows", @"", @"header", @"", @"footer", nil];
+            [g_cfg_sections addObject:section];
+        }
+        if (row->kind == R_HEAD) section[@"header"] = row->title ?: @"";
+        else if (row->kind == R_NOTE) section[@"footer"] = [section[@"footer"] length] ? [NSString stringWithFormat:@"%@\n%@", section[@"footer"], row->title] : row->title;
+        else [section[@"rows"] addObject:row];
+    }
 }
 static void cfg_rebuild(void) {
-	cfg_picker_dismiss();
-	const int tab = g_cfg_page >= 0 && g_cfg_page < 5 ? g_cfg_page : 0;
-	g_cfg_last_page = tab;
-	cfg_page_build(tab);
-	g_cfg_nav.topItem.title = [NSString stringWithUTF8String:cfg_tab_names[tab]];
-	g_cfg_segs.selectedSegmentIndex = tab;
-	[g_cfg_tbl reloadData];
-	[g_cfg_tbl setContentOffset:CGPointZero animated:NO];
+    cfg_picker_dismiss();
+    const int page = g_cfg_page >= 0 && g_cfg_page < 5 ? g_cfg_page : -2;
+    cfg_page_build(page); cfg_group_rows();
+    UINavigationItem *home = [[[UINavigationItem alloc] initWithTitle:@"Settings"] autorelease];
+    home.backButtonTitle = @"Settings";
+    UINavigationItem *current = home;
+    if (page >= 0) current = [[[UINavigationItem alloc] initWithTitle:[NSString stringWithUTF8String:cfg_tab_names[page]]] autorelease];
+    current.rightBarButtonItem = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:g_cfg_center action:@selector(done)] autorelease];
+    [g_cfg_nav setItems:page >= 0 ? @[home,current] : @[home] animated:!UIAccessibilityIsReduceMotionEnabled()];
+    [UIView transitionWithView:g_cfg_tbl duration:chrome_duration(0.16) options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction animations:^{
+        [g_cfg_tbl reloadData]; [g_cfg_tbl setContentOffset:CGPointZero animated:NO];
+    } completion:nil];
 }
 static void cfg_make(void) {
 	if (g_cfg_dim) return;
 	g_cfg_rows = [[NSMutableArray alloc] init];
+	g_cfg_sections = [[NSMutableArray alloc] init];
 	g_cfg_center = [[CfgCenter alloc] init];
 	g_cfg_dim = [[UIView alloc] initWithFrame:g_host.bounds];
 	g_cfg_dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	g_cfg_dim.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.55f];
+	g_cfg_dim.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.32f];
+	g_cfg_dim.hidden = YES; g_cfg_dim.alpha = 0;
 	tap_on(g_cfg_dim, ^{ cfg_close(); });
 	[g_host addSubview:g_cfg_dim];
 	[g_cfg_dim release];
 	const CGRect hb = g_host.bounds;
 	g_cfg_card = [[UIView alloc] initWithFrame:CGRectInset(hb, 14, 14)];
 	g_cfg_card.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	g_cfg_card.layer.cornerRadius = 16.0f;
+	g_cfg_card.layer.cornerRadius = 28.0f;
+	g_cfg_card.hidden = YES; g_cfg_card.alpha = 0; g_cfg_card.accessibilityViewIsModal = YES;
 	g_cfg_card.layer.masksToBounds = YES;
 	blur_fill(g_cfg_card, UIBlurEffectStyleSystemMaterialDark);
 	[g_host addSubview:g_cfg_card];
 	[g_cfg_card release];
-	/* the navigation bar: the page's name, Done at the right (the system's own button, the amber tint) */
+	/* Native navigation items provide Back and Done. */
 	g_cfg_nav = [[UINavigationBar alloc] initWithFrame:CGRectMake(0, 0, g_cfg_card.bounds.size.width, 44)];
 	g_cfg_nav.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-	g_cfg_nav.barStyle = UIBarStyleBlack;
+	g_cfg_nav.barStyle = UIBarStyleBlack; g_cfg_nav.delegate = g_cfg_center;
 	g_cfg_nav.translucent = YES;
 	g_cfg_nav.tintColor = [UIColor systemBlueColor];
 	{
@@ -1115,25 +1183,16 @@ static void cfg_make(void) {
 	[it release];
 	[g_cfg_card addSubview:g_cfg_nav];
 	[g_cfg_nav release];
-	/* the five pages: a real segmented control */
-	g_cfg_segs = [[UISegmentedControl alloc] initWithFrame:CGRectMake(14, 48, g_cfg_card.bounds.size.width - 28, 32)];
-	g_cfg_segs.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-	g_cfg_segs.backgroundColor = [UIColor tertiarySystemFillColor];
-	g_cfg_segs.selectedSegmentTintColor = [UIColor systemBlueColor];
-	[g_cfg_segs setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor labelColor]} forState:UIControlStateNormal];
-	[g_cfg_segs setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor]} forState:UIControlStateSelected];
-	for (int i = 0; i < 5; i++) [g_cfg_segs insertSegmentWithTitle:[NSString stringWithUTF8String:cfg_tab_names[i]] atIndex:i animated:NO];
-	__block UISegmentedControl *wsg = g_cfg_segs;
-	control_on(g_cfg_segs, UIControlEventValueChanged, ^{ ios_ui_haptic(0); g_cfg_page = (int)wsg.selectedSegmentIndex; cfg_rebuild(); });
-	[g_cfg_card addSubview:g_cfg_segs];
-	[g_cfg_segs release];
 	/* the page itself: a real table, inset-grouped (the Settings app's own look) */
 	g_cfg_tbl = [[UITableView alloc] initWithFrame:CGRectMake(10, 86, g_cfg_card.bounds.size.width - 20, g_cfg_card.bounds.size.height - 96) style:UITableViewStyleInsetGrouped];
 	g_cfg_tbl.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	g_cfg_tbl.dataSource = g_cfg_center;
 	g_cfg_tbl.delegate = g_cfg_center;
 	g_cfg_tbl.backgroundColor = [UIColor clearColor];
-	g_cfg_tbl.separatorColor = rgba(255, 255, 255, 0.08f);
+	g_cfg_tbl.separatorColor = [UIColor separatorColor];
+	g_cfg_tbl.sectionHeaderHeight = UITableViewAutomaticDimension;
+	g_cfg_tbl.sectionFooterHeight = UITableViewAutomaticDimension;
+	g_cfg_tbl.estimatedSectionHeaderHeight = 32; g_cfg_tbl.estimatedSectionFooterHeight = 40;
 	[g_cfg_card addSubview:g_cfg_tbl];
 	[g_cfg_tbl release];
 	chrome_log("    chrome: settings center made (%.0f x %.0f card)", g_cfg_card.bounds.size.width, g_cfg_card.bounds.size.height);
@@ -1144,13 +1203,16 @@ void ios_ui_settings_open(int tab) {
 	bar_up_close_all(); touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
 	overlay_open();   /* the menu's own open state: the pause, the input routing, the audio mute */
 	if (!g_cfg_dim) cfg_make();
-	if (tab >= 0 && tab < 5) g_cfg_page = tab; else if (g_cfg_page < 0) g_cfg_page = g_cfg_last_page;
+	g_cfg_page = tab >= 0 && tab < 5 ? tab : -2;
 	chrome_layout();
 	cfg_rebuild();
 	[g_host bringSubviewToFront:g_cfg_dim];
 	[g_host bringSubviewToFront:g_cfg_card];
 	[g_host bringSubviewToFront:g_toast_host];   /* the toasts answer over it, as they always did */
-	g_cfg_dim.hidden = NO; g_cfg_card.hidden = NO;
+	g_cfg_visible = YES; ++g_cfg_presentation;
+	g_cfg_dim.hidden = NO; g_cfg_card.hidden = NO; g_cfg_card.userInteractionEnabled = YES;
+	[UIView animateWithDuration:chrome_duration(0.22) delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{ g_cfg_card.alpha = g_cfg_dim.alpha = 1; } completion:nil];
+	UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, g_cfg_nav);
 	ios_ui_haptic(0);
 	chrome_log("    chrome: settings center open (page %d)", g_cfg_page);
 }
@@ -1201,6 +1263,10 @@ static ChromeCenter *g_center;
 int ios_ui_chrome_handle_event(const SDL_Event *event) {
     if (!g_installed) return 0;
     if (nd_handle_event(event)) return 1;
+    if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat && event->key.key == SDLK_ESCAPE) {
+        if (g_cfg_picker) { cfg_picker_dismiss(); return 1; }
+        if (g_cfg_visible && g_cfg_page >= 0) { g_cfg_page = -2; cfg_rebuild(); return 1; }
+    }
     if (bar_visible() && event->type == SDL_EVENT_KEY_DOWN && event->key.key == SDLK_ESCAPE) { bar_up_close_all(); return 1; }
     return 0;
 }
@@ -1215,9 +1281,12 @@ int ios_ui_chrome_handle_event(const SDL_Event *event) {
 	ios_ui_haptic(0);   /* the taptic engine answers the flip, as a native switch would */
 	g_eye_on = -1; eye_look();   /* the menu's own wording: the toast routes back here, natively */
 }
-- (void)pill:(id)sender { (void)sender; ios_ui_bar_open(); }
-- (void)pulled:(UIPanGestureRecognizer *)pan {
-    if (pan.state == UIGestureRecognizerStateChanged && [pan translationInView:g_host].y > 10) ios_ui_bar_open();
+- (void)accessibilityChanged:(NSNotification *)notification {
+    (void)notification;
+    if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ [self accessibilityChanged:nil]; }); return; }
+    chrome_refresh_materials(g_host);
+    [g_cfg_tbl reloadData]; [nd_table reloadData];
+    chrome_layout(); nd_layout();
 }
 - (void)tick:(CADisplayLink *)link {
     (void)link;
@@ -1237,11 +1306,10 @@ int ios_ui_chrome_handle_event(const SDL_Event *event) {
     if (g_pad_layer) [g_pad_layer sync];
     /* A controller or keyboard can open/close the same UIKit settings state. */
     const BOOL wantsSettings = overlay_native_settings_wanted();
-    if (wantsSettings && (!g_cfg_card || g_cfg_card.hidden)) ios_ui_settings_open(overlay_native_settings_page());
+    if (wantsSettings && !g_cfg_visible) ios_ui_settings_open(overlay_native_settings_page());
     if (!wantsSettings) cfg_picker_dismiss();
-    if (!wantsSettings && g_cfg_card && !g_cfg_card.hidden) {
-        g_cfg_card.hidden = YES; g_cfg_dim.hidden = YES; g_cfg_page = -1;
-    }
+    if (!wantsSettings && g_cfg_visible) cfg_hide();
+
     if (overlay_is_open() && bar_visible()) bar_up_close_all();
     osd_tick(); pause_tick(); intro_tick();
     static double lastStats;
@@ -1249,7 +1317,7 @@ int ios_ui_chrome_handle_event(const SDL_Event *event) {
     if (now - lastStats > 0.25) {
         lastStats = now;
         if (g_cfg_card && !g_cfg_card.hidden && g_cfg_page == 1) {
-            for (CfgCell *cell in g_cfg_tbl.visibleCells) if ([cell->model->title isEqualToString:@"Frame rate"]) {
+            for (CfgCell *cell in g_cfg_tbl.visibleCells) if (cell->model && [cell->model->title isEqualToString:@"Frame rate"]) {
                 cell->value.text = [NSString stringWithFormat:@"%.0f fps", overlay_fps()];
             }
         }
@@ -1266,20 +1334,20 @@ static void toast_show(NSString *title, NSString *body, double seconds) {
 		[g_toast_stack removeArrangedSubview:old]; [old removeFromSuperview];
 	}
 	UIView *card = [[UIView alloc] initWithFrame:CGRectZero];
-	card.backgroundColor = [UIColor colorWithRed:18/255.0 green:20/255.0 blue:26/255.0 alpha:0.94f];
-	card.layer.cornerRadius = 8.0f;
+	blur_fill(card, UIBlurEffectStyleSystemMaterialDark);
+	card.layer.cornerRadius = 20.0f;
 	card.clipsToBounds = YES;
 	card.userInteractionEnabled = NO;
-	UIView *edge = [[UIView alloc] initWithFrame:CGRectZero];   /* the amber bar down the left, as the ImGui card had */
-	edge.backgroundColor = [UIColor colorWithRed:255/255.0 green:186/255.0 blue:72/255.0 alpha:1.0f];
+	UIView *edge = [[UIView alloc] initWithFrame:CGRectZero];   /* compact feedback accent */
+	edge.backgroundColor = [UIColor systemBlueColor];
 	UILabel *t = [[UILabel alloc] initWithFrame:CGRectZero];
 	t.text = title; t.hidden = title.length == 0;
 	t.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
-	t.textColor = [UIColor colorWithRed:255/255.0 green:196/255.0 blue:92/255.0 alpha:1.0f];
+	t.textColor = [UIColor labelColor];
 	UILabel *b = [[UILabel alloc] initWithFrame:CGRectZero];
 	b.text = body; b.hidden = body.length == 0;
 	b.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
-	b.textColor = [UIColor colorWithRed:232/255.0 green:234/255.0 blue:240/255.0 alpha:1.0f];
+	b.textColor = [UIColor secondaryLabelColor];
 	b.numberOfLines = 0;
 	UIStackView *in = [[UIStackView alloc] initWithFrame:CGRectZero];
 	in.axis = UILayoutConstraintAxisVertical; in.spacing = 2.0f;
@@ -1297,9 +1365,9 @@ static void toast_show(NSString *title, NSString *body, double seconds) {
 	[g_toast_stack addArrangedSubview:card];
 	[card release]; [edge release]; [in release]; [t release]; [b release];   /* the hierarchy owns them all */
 	card.alpha = 0.0f;
-	[UIView animateWithDuration:0.18 animations:^{ card.alpha = 1.0f; }];
+	[UIView animateWithDuration:chrome_duration(0.18) animations:^{ card.alpha = 1.0f; }];
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-		[UIView animateWithDuration:0.30 animations:^{ card.alpha = 0.0f; } completion:^(BOOL done) {
+		[UIView animateWithDuration:chrome_duration(0.30) animations:^{ card.alpha = 0.0f; } completion:^(BOOL done) {
 			(void)done;
 			[g_toast_stack removeArrangedSubview:card]; [card removeFromSuperview];
 		}];
@@ -1378,6 +1446,8 @@ void ios_ui_chrome_install(void *native_window) {
 	           g_host, "chrome container");
 
 	g_center = [[ChromeCenter alloc] init];   /* kept: UIKit's targets and delegates don't retain */
+    [[NSNotificationCenter defaultCenter] addObserver:g_center selector:@selector(accessibilityChanged:) name:UIContentSizeCategoryDidChangeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:g_center selector:@selector(accessibilityChanged:) name:UIAccessibilityReduceTransparencyStatusDidChangeNotification object:nil];
 	g_eye = [[ChromeButton buttonWithType:UIButtonTypeCustom] retain];   /* +1 (buttonType autoreleases): the window's, after addSubview */
 	g_eye.frame = CGRectMake(8, 8, 46, 32);   /* tp_layout's own call moves it to the corner's margin */
 	g_eye.layer.cornerRadius = 11.0f;
@@ -1390,7 +1460,7 @@ void ios_ui_chrome_install(void *native_window) {
 	g_eye_on = -1; eye_look();
 
 	{	/* the pull's pill: the old ImGui tab asked for a tap, and the top edge's swipe is iOS's own
-		 * (notifications). A small handle at the top centre, tappable, gone while the strip is down */
+		 * (notifications). The compact gear below the eye presents a system menu */
 		g_menu_gear = [[ChromeMenuButton buttonWithType:UIButtonTypeCustom] retain];
 		g_menu_gear.frame = CGRectMake(8, 49, 46, 32);
 		g_menu_gear.autoresizingMask = UIViewAutoresizingFlexibleRightMargin;
@@ -1401,6 +1471,7 @@ void ios_ui_chrome_install(void *native_window) {
 		g_menu_gear.backgroundColor = rgba(16, 18, 24, 0.78f);   /* readable over both dark and bright scenes */
 		g_menu_gear.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.35f].CGColor;
 		g_menu_gear.layer.borderWidth = 0.5f;
+		chrome_chip(g_menu_gear, glyph(@"gear", 22, 22, [UIColor whiteColor]));
 		chrome_menu_install();
 		[g_host addSubview:g_menu_gear];
 		[g_host bringSubviewToFront:g_menu_gear];
@@ -1470,13 +1541,13 @@ static void chrome_layout(void) {
     g_menu_gear.frame = CGRectMake(margin, CGRectGetMaxY(g_eye.frame) + 12, 46, 32);
     g_pad_layer.frame = bounds;
     if (g_cfg_card) {
-        const CGRect frame = CGRectInset(safe, 8, 8);
+        const CGFloat cardWidth = fmin(720, safe.size.width - 32), height = safe.size.height - 32;
+        const CGRect frame = CGRectMake(CGRectGetMidX(safe)-cardWidth/2, CGRectGetMidY(safe)-height/2, cardWidth, height);
         const BOOL changed = !CGRectEqualToRect(g_cfg_card.frame, frame);
         g_cfg_dim.frame = bounds; g_cfg_card.frame = frame;
         const CGFloat width = g_cfg_card.bounds.size.width;
-        g_cfg_nav.frame = CGRectMake(0, 0, width, 44);
-        g_cfg_segs.frame = CGRectMake(12, 48, width - 24, 32);
-        g_cfg_tbl.frame = CGRectMake(0, 86, width, fmax(0, frame.size.height - 86));
+        g_cfg_nav.frame = CGRectMake(8, 4, width-16, 44);
+        g_cfg_tbl.frame = CGRectMake(0, 52, width, fmax(0, frame.size.height - 52));
         if (changed) { [g_cfg_tbl beginUpdates]; [g_cfg_tbl endUpdates]; }
     }
 }

@@ -51,6 +51,16 @@ static NSString *nd_save_summary(const SaveDlgRow *row) {
     }
     return [parts componentsJoinedByString:@" · "];
 }
+static void nd_focus_save(NSInteger index, BOOL scroll) {
+    if (!nd_save_row(index)) return;
+    nd_selected = (int)index;
+    for (NSIndexPath *path in nd_table.indexPathsForVisibleRows) {
+        UITableViewCell *cell = [nd_table cellForRowAtIndexPath:path];
+        cell.accessoryType = path.section == index ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        cell.accessibilityTraits = UIAccessibilityTraitButton | (path.section == index ? UIAccessibilityTraitSelected : 0);
+    }
+    [nd_table selectRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:index] animated:scroll scrollPosition:scroll ? UITableViewScrollPositionMiddle : UITableViewScrollPositionNone];
+}
 
 /* NSString.length is UTF-16 units, matching SceImeDialog's maxTextLength. */
 static BOOL nd_valid_text(NSString *text) {
@@ -131,9 +141,9 @@ static NativeDialogCenter *nd_center;
     return cell;
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
+    (void)table;
     if (!nd_active() || nd_kind != ND_SAVE_LIST || !nd_save_row(path.section)) return;
-    nd_selected = (int)path.section;
-    [table reloadData]; /* selecting a card does not immediately overwrite or load it */
+    nd_focus_save(path.section, NO); /* keep scroll position while selecting another card */
     nd_buttons[0].enabled = YES;
     ios_ui_haptic(0);
 }
@@ -290,7 +300,8 @@ static void nd_build(NDRequest r) {
     memset(nd_buttons,0,sizeof nd_buttons);
     for (NSUInteger i=0;i<r.labels.count && i<3;i++) {
         UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-        button.configuration = chrome_button_style(r.labels[i], i == 0, r.kind == ND_QUIT && i == 1);
+        const BOOL destructive = (r.kind == ND_QUIT && i == 1) || (r.kind == ND_SAVE_LIST && [r.labels[i] isEqualToString:@"Delete"]);
+        button.configuration = chrome_button_style(r.labels[i], i == 0 && !destructive, destructive);
         button.titleLabel.adjustsFontForContentSizeCategory = YES;
         const int index=(int)i, kind=r.kind, seq=r.seq;
         control_on(button,UIControlEventTouchUpInside,^{ nd_answer(kind,seq,index); });
@@ -317,8 +328,7 @@ static void nd_build(NDRequest r) {
     const NSInteger count = nd_rows.length/sizeof(SaveDlgRow);
     if (r.kind == ND_SAVE_LIST && count) {
         nd_selected = (int)fmax(0,fmin(nd_selected,count-1));
-        NSIndexPath *path = [NSIndexPath indexPathForRow:0 inSection:nd_selected];
-        [nd_table selectRowAtIndexPath:path animated:NO scrollPosition:UITableViewScrollPositionMiddle];
+        nd_focus_save(nd_selected, YES);
     }
     if (r.kind == ND_SAVE_LIST) nd_buttons[0].enabled = count > 0;
     [g_host bringSubviewToFront:nd_dim]; [g_host bringSubviewToFront:nd_card];
@@ -419,8 +429,7 @@ static int nd_handle_event(const SDL_Event *event) {
         const int count=nd_kind==ND_SAVE_LIST ? (int)(nd_rows.length/sizeof(SaveDlgRow)) : nd_button_count;
         nd_selected=(int)fmax(0,fmin(count-1,nd_selected+move));
         if(nd_kind==ND_SAVE_LIST && count) {
-            [nd_table reloadData];
-            [nd_table selectRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:nd_selected] animated:YES scrollPosition:UITableViewScrollPositionMiddle];
+            nd_focus_save(nd_selected, YES);
         } else for(int i=0;i<nd_button_count && i<3;i++) {
             nd_buttons[i].layer.borderWidth = i==nd_selected ? 2 : 0;
             nd_buttons[i].layer.borderColor = [UIColor systemBlueColor].CGColor;
