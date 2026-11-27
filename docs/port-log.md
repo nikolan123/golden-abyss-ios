@@ -945,3 +945,22 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   second stick, auto-aim on) separates them; an additive-look mode
   is the fix if the assist rides the velocity, and a deeper engine
   trace is next if it does not.
+
+### Step 55 — held R re-taps for semi-auto weapons; the bottom edge asks twice
+
+- The pistol fired once on a held R because the game is right: one
+  shot a trigger press, as the Vita's own trigger. The two-thumb
+  fire finger now re-taps it -- a 20 ms release every 125 ms, about
+  eight a second -- so a held thumb fires semi-auto weapons at a
+  hand's pace and automatic ones never notice a frame's gap. The
+  button's art stays pressed; only the game's bit pulses. The suite
+  covers the release and the re-press on the tick.
+- The home bar stays visible now, on purpose: with the indicator
+  hidden, the bottom edge's deferral had no bar to reveal on its
+  first swipe and the system often took the exit straight away --
+  the one-swipe-away the top edge had already lost. Visible bar,
+  all edges deferred: the first swipe peeks, the second acts.
+- The asked-for strong snap (always on the nearest live enemy while
+  aiming) is the next dig: it needs the enemy actor list out of the
+  game's memory -- a live-traced round, the game's own faint assist
+  confirmed present but too weak to feel.

@@ -892,7 +892,7 @@ static void cfg_page_controls(void) {
 				settings_set_int("touch_shoot", enabled); settings_save();
 				touchpad_cancel_all(); ios_ui_chrome_cancel_controls();
 			});
-			r->detail = @"Tap L to toggle aim, then hold and drag R to shoot and aim. Holding L keeps its normal behavior. Requires Touch look.";
+			r->detail = @"Hold R to fire -- drag it and the camera follows; a held R re-taps for semi-auto weapons. A thumb on L or its quick-tap latch is the aim.";
 		}
 	}
 	cfg_slider("Pad size", 60, 160, (float)touchpad_scale(), 1, ^(double v) { touchpad_set_scale((int)(v + 0.5)); });
@@ -1484,8 +1484,11 @@ int ios_ui_chrome_sync_window(int logical_w, int logical_h, int text_input, int 
     return 1;
 }
 
-/* the game's overrides for the system's edge gestures (ios_ui_chrome_install's runtime subclass) */
-static BOOL nativ_edges_yes(id self, SEL _cmd) { (void)self; (void)_cmd; return YES; }
+/* the game's overrides for the system's edge gestures (ios_ui_chrome_install's runtime subclass).
+ * The home bar stays visible on purpose: a hidden indicator weakens the bottom edge's deferral
+ * (its first swipe reveals the bar and asks again -- with no bar to reveal, the system often
+ * takes the exit straight away, which is exactly what one-swipe-away meant). */
+static BOOL nativ_home_bar_visible(id self, SEL _cmd) { (void)self; (void)_cmd; return NO; }
 static UIRectEdge nativ_edges_all(id self, SEL _cmd) { (void)self; (void)_cmd; return UIRectEdgeAll; }
 
 void ios_ui_chrome_install(void *native_window) {
@@ -1502,7 +1505,7 @@ void ios_ui_chrome_install(void *native_window) {
             if (!game_class) {
                 game_class = objc_allocateClassPair(object_getClass(root), "NativDeferredEdges", 0);
                 if (game_class) {
-                    class_addMethod(game_class, @selector(prefersHomeIndicatorAutoHidden), (IMP)nativ_edges_yes, "B@:");
+                    class_addMethod(game_class, @selector(prefersHomeIndicatorAutoHidden), (IMP)nativ_home_bar_visible, "B@:");
                     class_addMethod(game_class, @selector(preferredScreenEdgesDeferringSystemGestures), (IMP)nativ_edges_all, "Q@:");
                     objc_registerClassPair(game_class);
                 }

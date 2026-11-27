@@ -441,6 +441,15 @@ static void native_shooting(void) {
     touchpad_native_end(15,1013,0,0,1); assert(!tp_aim_latched && !(tp_bits&RTRIG));
     assert(!window_touch_look_delta(&dx,&dy)); neutral();
 
+    /* the semi-auto re-tap: a held two-thumb R pulses the trigger at a hand's pace */
+    shoot_ready(); aim_tap(2000);
+    assert(touchpad_native_begin(15,2001,700,30)); assert((tp_bits&RTRIG));
+    clock_ns+=200000000; window_touch_gameplay_tick(); tp_zone_tick();
+    assert(!(tp_bits&RTRIG));   /* the re-tap released it */
+    clock_ns+=30000000; window_touch_gameplay_tick(); tp_zone_tick();
+    assert((tp_bits&RTRIG));    /* and pressed again */
+    touchpad_native_end(15,2001,700,30,0); aim_tap(2002); neutral();   /* the latch goes too */
+
     /* Puzzle, menu, focus, setting and gameplay transitions clear assisted state. */
     for (int reason=0;reason<10;reason++) {
         shoot_ready(); aim_tap(1100); assert(touchpad_native_begin(15,1101,700,30));

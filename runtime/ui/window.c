@@ -1276,6 +1276,27 @@ static void tp_zone_tick(void) {
     if (!tv.on || !tv.w || overlay_is_open() || overlay_dialog_active()) return;
     if (!tl_gameplay_allowed()) { tp_stop_sticks(); return; }
     if (!window_touchpad_rstick() && !tl_want()) for (int i = 0; i < 10; i++) if (zwait[i].zone == 2) memset(&zwait[i], 0, sizeof zwait[i]);
+    /* the two-thumb fire finger holds R: the game's semi-auto weapons take one shot a trigger
+     * press (the Vita's own trigger is too), so a held thumb fires once. Re-tap the trigger
+     * at a hand's pace -- a 20 ms release and back every 125 ms. Auto weapons never notice a
+     * frame's gap; semi-auto ones fire as fast as they allow. The button's own art stays put
+     * (tv.b[].down is the finger's), only the game's bit pulses. */
+    {
+        static int fire_state; static uint64_t fire_at;
+        int r = -1;
+        for (int i = 0; i < 8; i++) if (tp_native[i].mode == TP_NATIVE_FIRE_LOOK) { r = i; break; }
+        if (r < 0 || !touchpad_native_shoot_available()) fire_state = 0;
+        else {
+            const uint64_t t = SDL_GetTicksNS();
+            if (!fire_state) {
+                if (!fire_at || t - fire_at >= 105000000ULL) {   /* (the first re-tap waits a full press) */
+                    tp_bits &= ~tv.b[r].bit; fire_state = 1; fire_at = t; tp_publish();
+                }
+            } else if (t - fire_at >= 20000000ULL) {
+                tp_bits |= tv.b[r].bit; fire_state = 0; fire_at = t; tp_publish();
+            }
+        }
+    }
     for (int i = 0; i < 10; i++) if (zwait[i].id && zwait[i].zone != 3) {
         SDL_Event e = {0}; e.type = SDL_EVENT_FINGER_MOTION;
         e.tfinger.fingerID = zwait[i].id;
