@@ -843,3 +843,27 @@ is still needed for presentation and interactions.
 Artifact: `NativUncharted-test48-unsigned.ipa`, 42,305,469 bytes; SHA-256
 `33aecff7811f8579bc4d34eb7ecf49a3753edf846f7863c14ee08c927e4dd952`.
 Committed locally; no GitHub push.
+
+### Step 56 — test49 shader preparation before play
+
+Fixed shader recipe loading from Windows-built packages: CRLF headers and record
+text are normalized before version/hash validation. The actual Uncharted recipe
+file now loads 417 shader recipes and 413 pipeline recipes instead of being
+rejected. Added production-code regression coverage for line endings, record
+integrity and merged files.
+
+iOS defaults to Before Play preparation, covering indexing, known recipes and
+the additional prediction pass. Skip restores background worker limits at any
+stage. Performance settings offers Background, Automatic and Before Play;
+saved choices still apply. First-install controls guidance appears afterward.
+Desktop defaults remain unchanged. Existing Metal cache reuse remains active;
+unseen combinations can still require compilation during play.
+
+The iOS build, shader/overlay/input sanitizer suites and upgrade package checks
+pass. The Clang report has three reviewed diagnostics in unchanged renderer draw
+paths and none in the loader/preparation changes. See
+`docs/ios-shader-preparation-test49.md` for behavior and device verification limits.
+
+Upgrade: `NativUncharted-test49-unsigned.ipa`, 42,307,267 bytes; SHA-256
+`0e38101e7983604ff98c5c687e238d4553b8e5d9b37047421a18bf158f92c4a5`.
+The earlier UI changes were pushed through `a8b9458`; shader changes are local.

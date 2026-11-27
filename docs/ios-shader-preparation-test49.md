@@ -48,12 +48,22 @@ zero recipe builds, both Skip transitions, extra-pass completion, worker limits,
 headless and synchronous modes. The native-overlay suite checks preparation
 priority over the first-launch hint. Both suites run in the shared test runner.
 
-Two unsigned packages use the same final arm64 executable: a small upgrade for
-the main phone, reusing the installed game data, and a full first-install package
-for the iPhone 11 Pro. Full-package checks compare every app0 filename and size
-with the source data, verify ZIP CRCs and runtime images, and compare its
-executable with the upgrade and final build. No shader cache from another GPU is
-bundled. Game data and cache files are not committed to Git.
+The unsigned upgrade package reuses the installed game data. Checks verify the
+arm64 executable, source/object freshness, ZIP CRCs, plist, exact executable
+equality with the final build, and matching HTTP download length. Its shipped
+recipe file is byte-identical to the file exercised by the loader regressions.
+No shader cache from another GPU is bundled. Game data and cache files are not
+committed to Git.
+
+The build and sanitizer regressions pass. Native Clang analysis reports no
+loader/preparation diagnostics. Its full renderer scan reports three diagnostics
+in unchanged draw paths: two index-width divisions (width is assigned 2 or 4)
+and a texture diagnostic guarded by a resolved texture/target. These were
+reviewed against their creation and guard paths; the report is retained.
+
+Artifact: `NativUncharted-test49-unsigned.ipa`, 42,307,267 bytes; SHA-256
+`0e38101e7983604ff98c5c687e238d4553b8e5d9b37047421a18bf158f92c4a5`.
+Records are under `C:/ProgramData/t3/nativ-test49-*`.
 
 Interactive device access is disabled here. Phone checks should confirm startup
 preparation completes, Skip restores play, subsequent launches reuse the cache,
