@@ -1,54 +1,44 @@
 name: Bug report
-description: Something in a game or the launcher doesn't work as it should
+description: Something in Golden Abyss for iOS doesn't work as it should
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting. The quickest fix starts with the report zip: press **F5** right after the problem happens, then in the launcher open the game's **⋯** menu and choose **Report a problem** ([how it works](https://github.com/TheLostPantheon/nativ/blob/main/docs/player-guide.md#reporting-a-bug)).
+        Thanks for reporting. The app writes its own log to `Documents/Nativ/session.log` — in the Files app under
+        **Golden Abyss**, then **Nativ** — and it is the first thing anyone will read, so please attach it.
         Please don't attach game files, firmware, saves or licences.
-  - type: dropdown
-    id: game
+  - type: input
+    id: device
     attributes:
-      label: Game
-      options:
-        - "Killzone: Mercenary"
-        - "Uncharted: Golden Abyss"
-        - Unit 13
-        - Shovel Knight
-        - The launcher, no game
-        - Another game
+      label: Device and iOS version
+      placeholder: iPhone 15 Pro Max, iOS 18.2
     validations:
       required: true
   - type: input
-    id: version
+    id: build
     attributes:
-      label: Nativ version
-      placeholder: v0.1.0
-    validations:
-      required: true
-  - type: input
-    id: computer
-    attributes:
-      label: Your computer
-      description: The operating system and its version, and the CPU or GPU if you know them.
-      placeholder: macOS 15.3, MacBook Air M2
+      label: Build
+      description: The ipa's name, and the commit it was built from if you know it.
+      placeholder: GoldenAbyss-unsigned.ipa, main @ 96283d5
     validations:
       required: true
   - type: textarea
     id: what
     attributes:
       label: What happened
-      description: What you saw, and what you expected instead.
+      description: What you saw, and what you expected instead. The chapter or area of the game helps.
     validations:
       required: true
   - type: textarea
     id: steps
     attributes:
       label: How to make it happen
-      description: Where in the game, and what you did just before. Does it happen every time?
+      description: What you did just before, and whether it happens every time.
   - type: textarea
-    id: report
+    id: log
     attributes:
-      label: Report zip
-      description: Drag the zip from **Report a problem** here. Over 25 MB (with F5 pictures), share a link to it instead.
+      label: session.log
+      description: Drag `Documents/Nativ/session.log` from the Files app here. If the app never gets far enough to
+        write one, paste what `idevicesyslog` (or Xcode's Devices window) printed instead, from before the launch.
+        Over 25 MB, share a link.

@@ -1,164 +1,71 @@
-<p align="center"><img src="assets/brand/banner.svg" alt="Project Nativ: your PS Vita games, rebuilt natively" width="720"></p>
+# Uncharted: Golden Abyss for iOS
 
-# Project Nativ
+Uncharted: Golden Abyss, statically recompiled from its ARM code into a native iOS app. A fork of
+[Project Nativ](https://github.com/TheLostPantheon/nativ) narrowed to this game on this platform: the engine and
+the Golden Abyss pack are upstream's, the iOS work is this fork's.
 
-Project Nativ turns PS Vita games into native programs for macOS, Linux and Windows. You bring your own copy of a
-game. The tools recompile it on your machine, and it runs like any other program, with extras the Vita never had:
-higher resolutions, wider screens, 60 fps and mouse aiming, depending on the game.
+## What it adds over the Vita
 
-## How it works
+- **JIT-less.** The game is translated to C ahead of time and compiled to arm64, so there is no interpreter and
+  no JIT: it runs on a stock device, without a jailbreak or a special entitlement.
+- **Native UI.** The menu bar, settings, dialogs and toasts are UIKit, not an imitation drawn over the game.
+- **Higher resolution** than the Vita's 960×544.
+- **MetalFX upscaling** (iOS 16 and later): the game renders below the screen's resolution and Apple's spatial
+  upscaler brings it up, which buys frame time on a phone.
+- **Touch controls**, including two-thumb shooting, and direct touch look: the camera turns as far as the finger
+  moves.
+- **Tilt**, from the phone's own gyro, for the balance sections.
 
-A Vita game is ARM code written against Sony's system software. Nativ handles the two separately.
+## Status
 
-- **The game's code is recompiled.** A static recompiler translates the game's ARMv7 code, Thumb-2, VFP and NEON
-  included, into C once, ahead of time. That C is compiled into a native program.
-- **The system underneath is rebuilt.** Sony's own libraries that a game loads, such as libgxm, libc and FIOS, are
-  recompiled with it from your firmware. Below them, a runtime stands in for the Vita's kernel and hardware: it runs
-  the game's threads, draws its graphics on your GPU and plays its sound.
+Playable on device; a work in progress. Tested on an iPhone 15 Pro Max.
 
-[How it works](docs/architecture.md) goes into the design.
+- US 1.00 (`PCSA00029`) only. The 1.03 update is not supported and not needed.
+- 60 fps is experimental: parts of the game run on fixed 1/30 s steps and speed up. Use 30.
+- One game per app: no launcher, no library.
+- Saves and settings live in the app's `Documents`, visible in Files.
 
-## Nothing of the game ships
+## What you need
 
-This repository holds no game code, game data or firmware, and nothing we distribute ever will. You supply your own
-copy of each game and Sony's firmware update file, and the tools decrypt and recompile them on your machine.
+- **Your own copy of the game** (`ux0:app/PCSA00029`, or a PKG with its licence) and **Sony's firmware update
+  file**. Neither is in this repository.
+- **Windows or macOS** with an iOS toolchain: clang targeting arm64 iOS with `ld64.lld`, the iPhoneOS SDK, and
+  SDL3, zlib, SPIRV-Cross and FFmpeg built for iOS (the three `ATIV_IOS_*` variables below say where they are).
+- **A way to install it**: Sideloadly or AltStore with a free Apple ID (re-signed every seven days), a paid
+  developer account (a year), or TrollStore on a device that supports it.
 
-## Supported games
+## Building
 
-These are the **Enhanced with Nativ** games: each has a pack with fixes and extras made for it, and each is tested with
-every release.
-
-<!-- games table: made by pipeline/packconf.py --table --write README.md -->
-| Game | Release | Title ID | Versions | Widescreen | Field of view | 1:1 mouse aim | FSR 3.1 | Online play |
-|---|---|---|---|---|---|---|---|---|
-| Killzone: Mercenary | US | PCSA00107 | 1.00, 1.12 (recommended: adds Botzone and online play) | Yes | Yes | Yes | Experimental | Yes (1.12) |
-| Uncharted: Golden Abyss | US | PCSA00029 | 1.00 | Yes | Yes | Yes | Experimental |  |
-| Unit 13 | US | PCSA00014 | 1.00 | Yes | Yes | Yes |  | Yes |
-| Shovel Knight | US | PCSE00640 | 1.00 |  |  |  |  |  |
-<!-- end of games table -->
-
-Every game plays at up to six times the Vita's resolution, and at 30 or 60 fps; 60 is experimental everywhere. The
-columns are what each game's pack adds, from its pack.toml's FEATURES, which the tests check against what the pack
-actually switches on.
-
-Each game's pack supports exact releases, recognised by the SHA-256 of the game's main program. Game-specific fixes,
-such as Killzone's physics fix or the widescreen cameras, patch code at fixed addresses, so they only fit the build
-they were written for. Your game data doesn't need to match; the main program does.
-
-Not supported yet: other regions (EU, JP, Asia) and the later updates of Uncharted (1.03), Unit 13 (1.01) and Shovel
-Knight (1.08, Treasure Trove). The launcher recognises them and tells you which release it supports. It keeps an
-unsupported update, and the game runs without it. Porting a new release starts with `dev/hookmap.py`, which carried
-43 of Killzone 1.12's 46 hooks over from 1.00 by matching code.
-
-**Any other game** can be tried as an experimental one, in the library's Other games section. Nativ makes a pack for it
-from your copy (its main program and the Sony libraries it uses), with none of the game-specific work. Whether it
-starts depends on the game, and there's no support. Another release or version of an Enhanced game can be tried the
-same way, without that game's fixes and extras.
-
-## Getting started
-
-**Players** use the launcher. It walks you through first-run setup, then builds and starts your games. Build it with
-`launcher/build.sh`; the result is `launcher/nativ`.
-
-**Developers** can run each stage of the pipeline with `./vitarecomp` from the top of the checkout. Run it without
-arguments for the full list.
-
-On Windows, use the Python driver directly from PowerShell instead of the zsh wrapper:
+Once those are in place:
 
 ```powershell
-.\.venv\Scripts\python.exe .\pipeline\vitarecomp.py --help
+# firmware and the game, decrypted and recompiled (once)
+.\.venv\Scripts\python.exe pipeline\vitarecomp.py firmware PSP2UPDAT.PUP
+.\.venv\Scripts\python.exe pipeline\vitarecomp.py add <copy of ux0:app\PCSA00029>
+
+# the app: arm64, iOS 15 minimum
+$env:TARGET = 'ios'
+$env:ATIV_IOS_TOOLCHAIN = 'D:\work\ios\toolchain'   # SDL3, zlib, SPIRV-Cross, FFmpeg built for iOS
+$env:ATIV_IOS_SDK = '<iPhoneOS SDK>'
+$env:ATIV_IOS_TC = '<clang toolchain bin, with ld64.lld>'
+.\.venv\Scripts\python.exe pipeline\vitarecomp.py build PCSA00029
+
+# the ipa
+.\.venv\Scripts\python.exe runtime\platform\ios\pack-ios.py PCSA00029
 ```
 
-Replace `--help` with a stage and its arguments. The Windows player release includes its own Python and toolchain;
-the [developer guide](docs/developers.md#making-a-release) describes building that distribution on macOS or Linux.
-
-The main stages, in order:
-
-| Command | What it does |
-|---|---|
-| `firmware <PUP>` | Decrypts Sony's firmware update file. |
-| `scan <folder>` | Finds games, updates and firmware files in a folder, at any depth. |
-| `add <copy>` | Adds a game or its update. `import` takes one that's already decrypted. |
-| `analyze <title>` | Finds the game's functions. |
-| `recompile <title>` | Translates them to C. |
-| `build <title>` | Compiles the game. |
-| `run <title>` | Plays it. |
-| `check <titles>` | Runs the regression gate. |
-
-The pipeline's Python needs the packages in `requirements.txt`, installed in `.venv` at the top of the checkout.
-The Windows player release includes its Python in `python/`.
-
-### Your library
-
-Your games, firmware, licences, builds and saves live in one library folder:
-
-- `dump/` inside a checkout, which git ignores;
-- otherwise your per-user data folder: `~/Library/Application Support/ProjectNativ/Nativ/library` on macOS, under
-  `~/.local/share` on Linux and under `%LOCALAPPDATA%` on Windows;
-- or wherever `ATIV_DUMP` points.
-
-### Installing
-
-`./vitarecomp dist <folder>` writes an install that holds only what ships. Running it again over an install it wrote
-updates the program and leaves your library alone. Two scripts add what a player's machine lacks:
-
-- **Linux:** `dev/linux-install.sh <folder>` adds its own compiler and Python, for machines like the Steam Deck that
-  have neither.
-- **macOS:** `dev/macos-install.sh <folder>` adds SDL, SPIRV-Cross, FFmpeg's H.264 decoder and Python, and a
-  `Project Nativ.app` to start it. The player needs only Apple's Command Line Tools, which the app offers to install.
-  Build the libraries once with `runtime/platform/macos/setup-toolchain.sh`.
-
-The [player guide](docs/player-guide.md) covers the rest from the player's side: first run, controls, online play and
-reporting a bug.
-
-## Repository layout
-
-| Folder | What's in it |
-|---|---|
-| `launcher/` | The launcher (`hub.cpp`): your library, first-run setup and settings. It runs the pipeline for you. |
-| `pipeline/` | The `vitarecomp` driver, plus game and licence handling. |
-| `recompiler/` | The static recompiler, its runtime header `rt.h`, and seeds for functions the analysis misses. |
-| `runtime/` | What a recompiled game runs on: `core/` (kernel and libraries), `gfx/` (graphics), `audio/`, `media/`, `input/`, `net/` (networking and online play), `ui/` (window and in-game menu), `platform/`, `debug/` and `tests/`. `build.py` builds it. |
-| `packs/<title>/` | One folder per game: `pack.toml` (versions, modules, hooks and settings), `hooks.c` (that game's code patches) and `shaders.txt` (its shader recipes). |
-| `decrypt/` | Decrypting firmware updates and game packages, converting SELF to ELF, and the table of Sony's function names. |
-| `servers/` | Killzone's login server stand-in (`kzserver/`) and the relay node for online play (`nativ-node/`). |
-| `dev/` | Developer tools: replays, diffs and bisects, the remote gate, tests and firmware research. |
-| `third_party/` | Dear ImGui, stb, LibAtrac9, Monocypher and the HE-VAG tables, each with its licence. |
-| `docs/` | The documentation listed below. |
-| `assets/brand/` | The logo, wordmark and app icons, all drawn from one geometry by `make.py`. |
-
-## Documentation
-
-- [Player guide](docs/player-guide.md): installing, first run, controls, online play, known issues and bug reports.
-- [How it works](docs/architecture.md): the design, layer by layer.
-- [Working on Nativ](docs/developers.md): the pipeline, packs and versions, and working across machines.
-- [The runtime in detail](docs/runtime.md): display timing, audio, the GPU backend, controls, hooks and metrics.
-- [Verification](docs/verification.md): the regression gate and how the translation and renderer are checked.
-- [Debugging a game](docs/debugging.md): logs, captures, replays and the renderer's switches.
-- [Online play](docs/online.md): matchmaking, finding other players, and the encrypted links between them.
-- [The shader compiler](docs/shader-compiler.md) and [the USSE instruction set](docs/usse-isa.md): the Vita's GPU
-  shaders and how we translate them.
-
-## Contributing
-
-Pull requests are open only to the maintainer, so please send issues instead: bug reports with their logs, and ideas.
-[CONTRIBUTORS.md](CONTRIBUTORS.md) names everyone whose code, ideas or analysis went into Nativ.
+That writes `dist/GoldenAbyss-unsigned.ipa`. `--smoke` packages the runtime alone, with no game data, to check
+that a build boots before sitting through a full one.
 
 ## Licence
 
-Project Nativ is free software under the GNU General Public License, version 2 or (at your option) any later version:
-see [LICENSE](LICENSE). Third-party code keeps its own licence, and [THIRD_PARTY.md](THIRD_PARTY.md) lists it with
-the projects parts of Nativ are ported from.
+GNU GPL, version 2 or later: [LICENSE](LICENSE). [CONTRIBUTORS.md](CONTRIBUTORS.md) and
+[THIRD_PARTY.md](THIRD_PARTY.md) carry the credits and the third-party licences this fork inherits.
 
-Nativ contains no Sony or game code. You supply your own games and the firmware from Sony's site; the games are
-recompiled on your machine and never leave it.
+No Sony or game code ships here, in either the repository or the ipa: your copy is decrypted and recompiled on
+your own machine.
 
-## AI disclaimer
+## AI disclosure
 
-Nativ is made with the help of AI tools: much of its code and documentation was written with AI assistance, under its
-developer's direction, and tested on the games themselves.
-
-## Supporting Nativ
-
-Nativ is free, and everything in it is for everyone. If you'd like to support its development, you can leave a tip on
-[Ko-fi](https://ko-fi.com/kingtorro).
+Nativ, and this fork with it, is written with AI assistance under its developer's direction, and tested on the
+game.
