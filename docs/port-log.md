@@ -1125,3 +1125,21 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   own line now names the camera and the target's world
   point, so the next capture says what it aimed at, not
   just which index won.
+
+### Step 62 — the playtest's own save rides in the ipa
+
+- Every device round began with the whole intro, because a
+  fresh install's Documents holds no fs/savedata0 and the
+  game starts from nothing. The pack can now carry a save:
+  packs/PCSA00029/savedata/ (the playtest's own six files,
+  plus a blank .slot1 marker, 0x34c zeroed bytes -- the
+  port's own history is that a blank param lists fine and
+  the game dates the slot by its file) is bundled by
+  pack-ios.py into data/savedata0, and the iOS bootstrap
+  copies it into Documents/Nativ/fs/savedata0 on first
+  boot -- only while that folder holds no checkpoint.bin
+  of its own, so a save the game has already written is
+  never overwritten by an update. The dotfile marker is
+  copied with the rest (a skip-the-dotfiles copy would
+  have silently dropped the one file that makes the slot
+  exist).

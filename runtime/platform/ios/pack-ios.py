@@ -109,6 +109,14 @@ def main():
     if os.path.isfile(shaders):
         shutil.copy2(shaders, os.path.join(DATA, "shaders.txt"))
 
+    # the pack's shipped save (savedata0: the bootstrap copies it into Documents on a fresh install)
+    saved = os.path.join(ROOT, "packs", TITLE, "savedata")
+    if os.path.isdir(saved):
+        dst = os.path.join(DATA, "savedata0")
+        os.makedirs(dst, exist_ok=True)
+        shutil.copytree(saved, dst, dirs_exist_ok=True)
+        print(f"  savedata -> data/savedata0 ({sum(os.path.getsize(os.path.join(a, f)) for a, _, fs2 in os.walk(saved) for f in fs2) / 1e3:.0f} KB)")
+
     with open(os.path.join(APP, "Info.plist"), "w", newline="\n", encoding="utf-8") as f:
         f.write(INFO_PLIST)
 

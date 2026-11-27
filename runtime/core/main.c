@@ -970,6 +970,44 @@ static void ios_bootstrap(int *argc, char ***argv) {
 	static char fs[PATH_MAX];
 	snprintf(fs, sizeof fs, "%sfs", work);
 	mkdir(fs, 0755);
+	{   /* the pack's shipped save (the bundle's data/savedata0): a fresh install starts where the
+	     * playtest left off, the intro not played once a build. Only when fs/savedata0 holds no
+	     * checkpoint.bin of its own -- a save already there is never overwritten. The slot markers
+	     * are dotfiles and ride along with everything else. */
+		char src[PATH_MAX], dst[PATH_MAX], probe[PATH_MAX];
+		snprintf(src, sizeof src, "%s/savedata0", data);
+		snprintf(dst, sizeof dst, "%s/savedata0", fs);
+		snprintf(probe, sizeof probe, "%s/checkpoint.bin", dst);
+		if (access(src, F_OK) == 0 && access(probe, F_OK) != 0) {
+			mkdir(dst, 0755);
+			DIR *d = opendir(src);
+			if (d) {
+				struct dirent *e;
+				while ((e = readdir(d))) {
+					if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+					char s2[PATH_MAX], d2[PATH_MAX];
+					struct stat st;
+					snprintf(s2, sizeof s2, "%s/%s", src, e->d_name);
+					snprintf(d2, sizeof d2, "%s/%s", dst, e->d_name);
+					if (stat(s2, &st) == 0 && S_ISREG(st.st_mode)) {
+						FILE *in = fopen(s2, "rb");
+						if (in) {
+							FILE *out = fopen(d2, "wb");
+							if (out) {
+								char buf[65536];
+								size_t r;
+								while ((r = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, r, out);
+								fclose(out);
+							}
+							fclose(in);
+						}
+					}
+				}
+				closedir(d);
+				fprintf(stderr, "ios: the shipped savedata0 restored to %s\n", dst);
+			}
+		}
+	}
 
 	char app0[PATH_MAX] = "";
 	{   /* 1: <fs>/app0, the player's own copy */
