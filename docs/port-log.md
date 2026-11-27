@@ -964,3 +964,20 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   aiming) is the next dig: it needs the enemy actor list out of the
   game's memory -- a live-traced round, the game's own faint assist
   confirmed present but too weak to feel.
+
+### Step 56 — the magnetism round opens with the assist's ground truth
+
+- The strong snap (always on the nearest live enemy while aiming)
+- needs the game's own aim assist understood first: its toggle
+  exists (Options -> Aiming), its effect is present but too faint
+  to feel, and no Lua knob exposes its strength -- it is pure
+  engine code. The camera's "set look velocity" (uc_look_velocity's
+  own call site) is where an assist would leave its mark, and the
+  touch path replaces that velocity -- so the hook now logs the
+  game's own value before the replacement (RECOMP_UC_AIM_TRACE,
+  throttled to a twentieth of the frames).
+- One firefight with the game's Auto Aim on, one with it off, and
+  the difference between the two logs is the assist's own
+  contribution -- the thing to amplify, or the proof that a
+  host-side magnet (the enemy actor list, live-traced) is the
+  only way to effortless.

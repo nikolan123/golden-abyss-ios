@@ -1197,6 +1197,21 @@ void recomp_ihook_uc_mouse_look(Cpu *c, int reg) {
  * Mouse counts are scaled at input time; touch has its own screen-width scale. */
 void recomp_ihook_uc_look_velocity(Cpu *c, int reg) {
 	(void)reg;
+	{	/* RECOMP_UC_AIM_TRACE: what the game itself stored as the camera's look velocity this
+	 * frame -- its own aim assist's contribution rides it when the option has it on -- logged
+	 * before the touch path replaces it. The magnetism round's ground truth: a firefight with
+	 * the game's Auto Aim on, then one with it off, and the difference between the two logs
+	 * is the assist itself. */
+		static int on = -1; if (on < 0) on = getenv("RECOMP_UC_AIM_TRACE") != 0;
+		if (on) {
+			static int n; if (n++ % 20 == 0) {
+				extern uint64_t display_frames(void);
+				uint32_t cam = c->r[0], bx = RD32(cam + 0x160), by = RD32(cam + 0x164);
+				float px, py; memcpy(&px, &bx, 4); memcpy(&py, &by, 4);
+				fprintf(stderr, "uc aim: frame %llu the game's v (%.4f, %.4f), touch pending (%.4f, %.4f)\n", (unsigned long long)display_frames(), px, py, uc_mx, uc_my);
+			}
+		}
+	}
 	if (uc_mx == 0 && uc_my == 0) return;
 	float vx = uc_mx, vy = uc_my; uint32_t bx, by; memcpy(&bx, &vx, 4); memcpy(&by, &vy, 4);
 	uint32_t cam = c->r[0];
