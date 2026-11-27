@@ -42,9 +42,10 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 static int pose_flat(void) { char b[16]; return !strcmp(settings_str("gyro_pose", "upright", b, sizeof b), "flat"); }
 /* SDL gamepad axes -> Vita device axes, per the pose (see the header) */
 static int virt;           /* the current samples are the virtual pad's (motion_feed_virtual): always the upright pose */
+static int native;         /* the current samples are a device held as the Vita itself (ios_motion.m: the phone in hand): already in its screen frame */
 void motion_pause(void);
 static void to_vita(const float s[3], float v[3]) {
-	if (!virt && pose_flat()) { v[0] = s[0]; v[1] = -s[2]; v[2] = s[1]; }
+	if (!virt && !native && pose_flat()) { v[0] = s[0]; v[1] = -s[2]; v[2] = s[1]; }
 	else { v[0] = s[0]; v[1] = s[1]; v[2] = s[2]; }
 }
 static float clampf(float v, float lim) { return v < -lim ? -lim : v > lim ? lim : v; }
@@ -167,6 +168,14 @@ void motion_feed_virtual(float angle, uint64_t t_ns) {
 	feed_accel(acc, t_ns); feed_gyro(gyr, t_ns, 1.0);
 }
 void motion_recenter(void) { pthread_mutex_lock(&mx); if (started) make_recenter(); else want_recenter = 1; pthread_mutex_unlock(&mx); }
+/* the phone's own sensor (ios_motion.m): its samples arrive already in the Vita's screen frame --
+ * a phone in hand IS the device, neither pose applies. A change of source starts the filter
+ * afresh (the pose's quarter turn would otherwise be a huge step). */
+void motion_source_native(int on) {
+	pthread_mutex_lock(&mx);
+	if (native != (on != 0)) { native = on != 0; started = have_acc = 0; last_gyro_ns = 0; }
+	pthread_mutex_unlock(&mx);
+}
 /* the menu opened or the pad went away: the next sample starts a fresh interval */
 void motion_pause(void) { pthread_mutex_lock(&mx); last_gyro_ns = 0; pthread_mutex_unlock(&mx); }
 void motion_lost(void) { pthread_mutex_lock(&mx); started = have_acc = 0; last_any_ns = 0; acc_t_ns = 0; pthread_mutex_unlock(&mx); }

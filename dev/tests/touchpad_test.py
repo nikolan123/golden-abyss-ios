@@ -80,6 +80,8 @@ static int mouse_script(float *x,float *y) { script_reads++; *x=*y=0; return 0; 
 static struct { int held; } kb_binds[KB_N];
 static void motion_pause(void) { motion_pauses++; }
 static void ios_ui_chrome_cancel_controls(void) { native_cancels++; }
+static int ios_gyro_on;                                  /* the phone's own sensor as a source (ios_motion.m) */
+static int window_gyro_present(void) { return pad_gyro || ios_gyro_on; }
 static int touchpad_active(void) { for(int i=0;i<TP_FINGERS;i++) if(tp_down[i]) return 1; return 0; }
 static int game_gesture,game_twist;
 static int gesture_wanted(void) { return game_gesture; }
@@ -481,7 +483,20 @@ static void native_shooting(void) {
     unsetenv("RECOMP_TOUCH_GAMEPLAY_GATE");
     puts("PASS: native toggle aim/fire drag, final motion, normal L/R holds, exclusive camera owner, stale contacts, puzzle/menu/focus/preferences/layout resets, SDL and hardware input isolation");
 }
-int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); game_menu_routing(); native_shooting(); return 0; }
+static void tilt_gate(void) {
+    /* a tilt section without a gyro source: the left stick's left/right is the tilt, not a step;
+     * the phone's own sensor (ios_motion) is a source exactly like a pad's gyro and keeps the stick the game's */
+    tilt_section=1; pad_gyro=0; ios_gyro_on=0; sticks[0]=200;
+    uint32_t bits; uint8_t axes[4]={128,128,128,128};
+    window_input(&bits,axes); assert(axes[0]==128 && axes[1]==128);
+    ios_gyro_on=1;
+    window_input(&bits,axes); assert(axes[0]==200);
+    pad_gyro=1;
+    window_input(&bits,axes); assert(axes[0]==200);
+    tilt_section=0; pad_gyro=0; ios_gyro_on=0; sticks[0]=128;
+    puts("PASS: a tilt section takes the left stick only without a gyro source -- a pad's or the phone's");
+}
+int main(void) { geometry(); input(); holds(); publication(); focus(); direct_look(); look_publication(); camera_hook(); game_menu_routing(); native_shooting(); tilt_gate(); return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='nativ-touchpad-') as folder:
     source = Path(folder) / 'test.c'

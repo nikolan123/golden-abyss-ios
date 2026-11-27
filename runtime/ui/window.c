@@ -148,9 +148,17 @@ static int ptrig[2];                                /* the physical triggers pas
  * (kb_reload: at start and as the menu closes, when nothing is held) */
 static int shoulders_swapped;
 static volatile int pad_gyro;               /* the pad has a gyroscope and accelerometer streaming (motion.c) */
+#if IOS_UI_CHROME
+extern int ios_motion_present(void);        /* the phone's own sensor is a source too (ios_motion.m, CoreMotion) */
+extern int ios_motion_hold(int on);         /* a gyro pad in hand takes the source; the phone stands down */
+#else
+static inline int ios_motion_present(void) { return 0; }
+static inline int ios_motion_hold(int on) { (void)on; return 0; }
+#endif
 void motion_feed_accel(const float s[3], uint64_t t_ns); void motion_feed_gyro(const float s[3], uint64_t t_ns);
 void motion_recenter(void); void motion_pause(void); void motion_lost(void); void motion_feed_virtual(float angle, uint64_t t_ns); int motion_use_virtual(int on, float *roll);
-int window_gyro_present(void) { return pad_gyro; }
+int window_gyro_present(void) { return pad_gyro || ios_motion_present(); }
+int window_gyro_is_pad(void) { return pad_gyro; }   /* the "upright/flat" pose is a pad's only: a phone in hand is the device itself */
 static SDL_Window *win;
 
 /* ---- keyboard + mouse (settings "input_mode": auto | pad | kbm, default auto; "mouse_look" 1, "mouse_sens"
@@ -205,8 +213,12 @@ static void tilt_section_update(void) {
 		const char *title = tilt_kind == 2 ? "Slide" : "Balance", *verb = tilt_kind == 2 ? "steer" : "tilt";
 		char msg[160];
 		if (kbm_on) snprintf(msg, sizeof msg, "[%s] [%s] %s left / right", SDL_GetKeyName(kb_binds[KB_MOVE_LEFT].kc), SDL_GetKeyName(kb_binds[KB_MOVE_RIGHT].kc), verb);
-		else if (!pad_gyro) snprintf(msg, sizeof msg, "Left stick: %s left / right", verb);
+		else if (!window_gyro_present()) snprintf(msg, sizeof msg, "Left stick: %s left / right", verb);
+#if IOS_UI_CHROME
+		else snprintf(msg, sizeof msg, "Tilt the phone to %s", verb);   /* the phone's own sensor is the source there */
+#else
 		else snprintf(msg, sizeof msg, "Tilt the controller to %s", verb);
+#endif
 		overlay_toast_titled(title, msg, 5.0);
 	}
 	tilt_section = on;
@@ -1472,7 +1484,7 @@ void window_input(uint32_t *b, uint8_t s[4]) {
 	if (cur_mode && !touchpad_active()) s[0] = s[1] = s[2] = s[3] = 128;
 	if (gesture_wanted()) s[2] = s[3] = 128;   /* a gesture window: the right stick flicks a swipe (window_touch_gesture_hint) */
 	if (twist_wanted() && !kbm_on) s[0] = s[1] = s[2] = s[3] = 128;   /* a twist: the sticks are its fingers (window_touch_twist_hint) */
-	if (tilt_section && (kbm_on || !pad_gyro)) s[0] = 128;   /* a tilt section: left/right is the tilt (A / D, a gyro-less pad's stick), not a step or a steer */
+	if (tilt_section && (kbm_on || !window_gyro_present())) s[0] = 128;   /* a tilt section: left/right is the tilt (A / D, a gyro-less setup's stick), not a step or a steer */
 }
 /* a PS TV's pad (display.c: the "2" reads of port 1): the handheld's L and R are its L1 and R1, as a PS TV gives them to a
  * game that never asks; the other shoulder pair is its L2 and R2, and the stick clicks are there */
@@ -1578,6 +1590,10 @@ static void ios_window_geometry_tick(void) {
     SDL_GetWindowSize(win, &logical_w, &logical_h);
     if (ios_ui_chrome_sync_window(logical_w, logical_h, SDL_TextInputActive(win) || SDL_ScreenKeyboardShown(win), &actual_w, &actual_h))
         touchpad_layout_for((float)actual_w, (float)actual_h);
+    {   /* the phone's own sensor starts with the window and stays for the app's life (idempotent) */
+        extern int ios_motion_start(void);
+        ios_motion_start();
+    }
 }
 #endif
 
@@ -1802,9 +1818,10 @@ void window_run(void *(*fn)(void *), void *arg) {
 				int g = SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) && SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true);
 				int a = SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) && SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true);
 				pad_gyro = g && a;
+				if (pad_gyro) ios_motion_hold(1);   /* its samples take the source; the phone's stand down (ios_motion.m) */
 				fprintf(stderr, "gamepad: %s%s%s\n", SDL_GetGamepadName(pad) ? SDL_GetGamepadName(pad) : "?", SDL_GetNumGamepadTouchpads(pad) > 0 ? ", touchpad" : "", pad_gyro ? ", gyro" : "");
 			}
-			if (e.type == SDL_EVENT_GAMEPAD_REMOVED && pad && SDL_GetGamepadID(pad) == e.gdevice.which) { SDL_CloseGamepad(pad); pad = 0; pad_back = pad_start = pad_combo_latch = 0; __atomic_store_n(&pad_connected, 0, __ATOMIC_RELAXED); pad_gyro = 0; motion_lost(); gamepad_touch_release(); buttons = 0; for (int i = 0; i < 4; i++) { sticks[i] = 128; pad_raw[i] = 0; } }
+			if (e.type == SDL_EVENT_GAMEPAD_REMOVED && pad && SDL_GetGamepadID(pad) == e.gdevice.which) { SDL_CloseGamepad(pad); pad = 0; pad_back = pad_start = pad_combo_latch = 0; __atomic_store_n(&pad_connected, 0, __ATOMIC_RELAXED); pad_gyro = 0; motion_lost(); ios_motion_hold(0); gamepad_touch_release(); buttons = 0; for (int i = 0; i < 4; i++) { sticks[i] = 128; pad_raw[i] = 0; } }
 			if (e.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE) {
 				if (e.gsensor.sensor == SDL_SENSOR_ACCEL) motion_feed_accel(e.gsensor.data, e.gsensor.sensor_timestamp);
 				else if (e.gsensor.sensor == SDL_SENSOR_GYRO) motion_feed_gyro(e.gsensor.data, e.gsensor.sensor_timestamp);
@@ -1952,11 +1969,11 @@ void window_run(void *(*fn)(void *), void *arg) {
 				/* keyboard + mouse, or a pad without a gyro: the virtual pad; a pad with one in hand: its gyro. A change
 				 * mid-section glides (motion.c) and the virtual tilt carries on from the angle the game was reading. */
 				float roll;
-				if (motion_use_virtual(on || !pad_gyro, &roll)) tilt = roll > TILT_MAX ? TILT_MAX : roll < -TILT_MAX ? -TILT_MAX : roll;
+				if (motion_use_virtual(on || !window_gyro_present(), &roll)) tilt = roll > TILT_MAX ? TILT_MAX : roll < -TILT_MAX ? -TILT_MAX : roll;
 				float want = 0;
 				if (tilt_section && !overlay_is_open()) {
 					if (on) want = (float)(kb_binds[KB_MOVE_RIGHT].held - kb_binds[KB_MOVE_LEFT].held) * TILT_MAX;   /* A / D: eased toward a full tilt while held */
-					else if (!pad_gyro) { float sx = (sticks[0] - 127.5f) / 127.5f; if (fabsf(sx) < 0.12f) sx = 0; want = sx * TILT_MAX; }   /* the left stick, analog */
+					else if (!window_gyro_present()) { float sx = (sticks[0] - 127.5f) / 127.5f; if (fabsf(sx) < 0.12f) sx = 0; want = sx * TILT_MAX; }   /* the left stick, analog */
 				}
 				tilt += (want - tilt) * (float)(1.0 - exp(-dt / (on ? 0.12 : 0.06)));   /* (out of a section: back to level) */
 				motion_feed_virtual(tilt, SDL_GetTicksNS());   /* (dropped unless the virtual pad is the source) */

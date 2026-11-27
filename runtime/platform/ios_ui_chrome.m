@@ -23,6 +23,8 @@ extern void touchpad_native_release(int which);
 void ios_ui_haptic(int kind);                    /* this file's own: 0 light, 1 medium, 2 soft */
 /* the bar's handles (window.c / overlay.cpp / settings): every row's action the same one the ImGui row took */
 extern int  touchpad_scale(void); extern void touchpad_set_scale(int percent);
+extern void ios_motion_orient(int o);     /* the phone's own sensor (ios_motion.m): the game's current landscape */
+extern int window_gyro_is_pad(void);      /* window.c: a physical pad's gyro is the source (the pose row is a pad's only) */
 extern int  touchpad_mirror(void); extern void touchpad_set_mirror(int on);   /* touchpad.h has these too; the externs keep the list in one place */
 extern int  window_touchpad_rstick(void);
 extern int  settings_int(const char *key, int dflt);
@@ -907,7 +909,7 @@ static void cfg_page_controls(void) {
 			CfgRow *r = cfg_switch("Gyro", overlay_gyro_get(), ^(int to) { overlay_gyro_set(to); });
 			r->detail = @"The phone stands in for the Vita's motion sensor";
 		}
-		cfg_segrow("A level phone is a Vita held", @[@"Upright", @"Flat"], overlay_gyro_pose_get(), ^(int i) { overlay_gyro_pose_set(i == 1); });
+		if (window_gyro_is_pad()) cfg_segrow("A level phone is a Vita held", @[@"Upright", @"Flat"], overlay_gyro_pose_get(), ^(int i) { overlay_gyro_pose_set(i == 1); });
 		cfg_slider("Gyro sensitivity", 0.25, 3.0, overlay_opt_get("gyro_sens"), 0, ^(double v) { overlay_opt_set("gyro_sens", (float)v); });
 		cfg_button("Recentre the gyro", ^{ overlay_gyro_recentre(); ios_ui_haptic(0); });
 	}
@@ -1449,6 +1451,7 @@ void ios_ui_chrome_toast(const char *title, const char *body, double seconds) {
  * size can remain unchanged while its Metal UIView/drawable returns in portrait after resume. */
 int ios_ui_chrome_sync_window(int logical_w, int logical_h, int text_input, int *width, int *height) {
     if (!g_win || ![NSThread isMainThread]) return 0;
+    ios_motion_orient(g_win.windowScene.interfaceOrientation);   /* the motion feed's axis map (ios_motion.m), on this main thread */
     UIViewController *controller = g_win.rootViewController;
     UIView *game = controller.view;
     if (!game || !game.superview || ![game.layer isKindOfClass:[CAMetalLayer class]]) return 0;

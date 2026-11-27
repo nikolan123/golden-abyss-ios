@@ -885,3 +885,29 @@ The earlier UI changes were pushed through `a8b9458`; shader changes are local.
   layout changes and hidden controls clear the synthetic state --
   the suite covers each. Controls carries the toggle back to the
   original behavior.
+
+### Step 52 — the phone's own gyroscope is the Vita's motion sensor
+
+- Tilt sections (the balance beams, the river slide) had nothing to
+  read on the phone: the sensor path took a gamepad's samples, and
+  with no pad the sections fell back to the left stick. The phone
+  has the same two sensors the Vita has, so iOS now feeds them:
+  CoreMotion's accelerometer and gyroscope at 60 Hz, rotated from
+  the device's portrait frame into the game screen's landscape
+  frame (whichever way round it is being held -- the chrome's
+  window sync hands the interface orientation over), into the
+  same motion.c filter a gyro pad's samples ride. A phone held in
+  landscape IS the device, so neither "upright/flat" pose applies
+  -- motion.c gained a native source that passes the samples
+  through as the Vita's own frame. The accelerometers' opposite
+  sign conventions (CoreMotion's gravity vector against SDL's
+  specific force) are converted on the way in.
+- The phone counts exactly like a gyro pad everywhere: the Motion
+  section of the settings center (its Gyro toggle, sensitivity,
+  Recentre), the balance/slide toasts ("Tilt the phone"), the
+  left-stick fallback stood down, and the source chooser. A gyro
+  pad connected by hand takes the source back (the phone stands
+  down, its native flag with it -- the pad's pose applies again)
+  and returns it on disconnect. The regression suite gains the
+  tilt gate: a gyro source, whichever it is, keeps the left stick
+  the game's in a tilt section.

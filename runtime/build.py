@@ -204,7 +204,8 @@ def main(argv):
         # platform_posix.c is the same OS layer macOS and Linux use; ios_shims.m is the compiler-rt the toolchain lacks
         # (the chrome: UIKit's own eye, top pull and toasts -- built for iOS alone, nothing on a desktop)
         # gfx_metalfx.m: Apple's MetalFX spatial upscale at present (iOS 16+, weak-linked; RECOMP_METALFX=1)
-        PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m"), os.path.join(ROOT, "runtime", "platform", "ios_ui_chrome.m"), os.path.join(ROOT, "runtime", "gfx", "gfx_metalfx.m")]
+        # ios_motion.m: the phone's own gyro/accelerometer as the Vita's motion sensor (CoreMotion)
+        PLATFORM = [part("platform_posix"), os.path.join(ROOT, "runtime", "platform", "ios_shims.m"), os.path.join(ROOT, "runtime", "platform", "ios_ui_chrome.m"), os.path.join(ROOT, "runtime", "gfx", "gfx_metalfx.m"), os.path.join(ROOT, "runtime", "platform", "ios_motion.m")]
         FRAMEWORKS = [x for fr in ("UIKit Metal QuartzCore CoreGraphics CoreAudio AudioToolbox AVFoundation "
                                    "CoreVideo CoreMotion CoreMedia CoreBluetooth Foundation GameController OpenGLES "
                                    "VideoToolbox").split()
