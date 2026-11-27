@@ -50,3 +50,10 @@ with normal/large text and accessibility material settings. The heartbeat's
 timing should also be checked during slow frames and gameplay/menu transitions.
 
 These changes are committed locally. They have not been pushed to GitHub.
+
+The regenerated arm64 iOS build, Clang analysis and IPA checks passed. The
+download endpoint returns HTTP 200 with the expected length. Artifact:
+`NativUncharted-test47-unsigned.ipa`, 42,313,273 bytes; SHA-256
+`e55fccb3313d5287b39bbb8323f7ba32363f3085b29d3b96c850decb935c2bd6`.
+Build, analysis, packaging and validation records are under
+`C:/ProgramData/t3/nativ-test47-*`. The local-commit secret scan found no leaks.

@@ -803,3 +803,25 @@ The iOS build, full native Clang analysis, sanitized overlay/input suites and
 184-check dialog API suite pass. Device access is disabled here, so visual and
 interaction approval still needs a phone. See `docs/ios-ui-test46-polish.md`.
 These UI passes are committed locally and have not been pushed to GitHub.
+
+### Step 54 — test47 chapter-menu gestures and dialog fixes
+
+Uncharted now gates floating sticks and touch look on eligible gameplay updates,
+so chapter/difficulty screens keep their original touch gestures. Sensitivity
+defaults to 400% with a 30–1000% slider; saved choices still apply. The gear uses
+an explicit tap target and native navigation popover. Floating chrome uses
+neutral tint, and notifications are darker with no blue accent stripe.
+
+Save questions and simple confirmations use system alerts. Save selection has
+one compact grouped list with one available new slot, reduced spacing and
+original backend row indices preserved. See `docs/ios-ui-test47-fixes.md`.
+
+Regenerated guest code includes the gameplay hook. The iOS build, Clang analysis,
+sanitized touch/camera and native-overlay suites, 184 dialog API checks, pack
+validation and secret scan pass. IPA checks confirm fresh code, arm64/plist/ZIP
+integrity, exact executable equality and HTTP length. Final appearance and
+chapter-menu/gameplay transitions still require phone testing.
+
+Artifact: `NativUncharted-test47-unsigned.ipa`, 42,313,273 bytes; SHA-256
+`e55fccb3313d5287b39bbb8323f7ba32363f3085b29d3b96c850decb935c2bd6`.
+Changes remain local and have not been pushed to GitHub.
